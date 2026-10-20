@@ -1,0 +1,15 @@
+env.sh
+*.env
+__pycache__/
+*.py[cod]
+cfst
+*.tar.gz
+*.zip
+*.log
+report.txt
+best-ips.txt
+status.json
+result*.csv*
+优选IP库.txt
+.scan.*/
+.DS_Store

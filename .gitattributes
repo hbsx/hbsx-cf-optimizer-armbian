@@ -1,0 +1,3 @@
+* text=auto eol=lf
+*.sh text eol=lf
+linux/cf-optimizer text eol=lf

@@ -1,0 +1,24 @@
+[Unit]
+Description=Cloudflare NRT IP selection (Armbian, no DNS updates)
+Wants=network-online.target
+After=network-online.target mihomo.service
+
+[Service]
+Type=oneshot
+NotifyAccess=all
+ExecStart=/usr/local/sbin/cf-optimizer --force
+ExecStopPost=/usr/local/sbin/cf-optimizer cleanup
+TimeoutStartSec=42min
+TimeoutStopSec=30s
+KillMode=control-group
+Nice=10
+IOSchedulingClass=idle
+StandardOutput=null
+StandardError=null
+LogLevelMax=0
+ProtectSystem=strict
+ReadWritePaths=/run
+ProtectHome=true
+MemoryMax=256M
+MemorySwapMax=0
+LimitCORE=0

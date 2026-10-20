@@ -1,0 +1,57 @@
+#!/bin/bash
+# Root-owned launcher: do not source any user-writable project file here.
+set -euo pipefail
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+[[ $EUID == 0 ]] || { echo 'Run with sudo.' >&2; exit 1; }
+exec 9>/run/lock/cf-optimizer.lock
+flock -n 9 || { echo 'Another scan is running.' >&2; exit 1; }
+uid=$(id -u cfoptimizer)
+priority=8990
+remove_rules() {
+    for family in -4 -6; do
+        while ip "$family" rule del pref "$priority" uidrange "$uid-$uid" lookup main 2>/dev/null; do :; done
+    done
+}
+clean_runtime() {
+    remove_rules
+    if [[ -d /run/cf-optimizer && ! -L /run/cf-optimizer ]]; then
+        find /run/cf-optimizer -mindepth 1 -maxdepth 1 ! -name best-ips.txt -exec rm -rf -- {} +
+    fi
+}
+if [[ "${1:-}" == cleanup ]]; then clean_runtime; exit 0; fi
+mode="${1:---force}"
+case "$mode" in --check|--smoke|--force|--scheduled) ;; *) echo 'Usage: cf-optimizer [--check|--smoke|--force|--scheduled]' >&2; exit 2;; esac
+[[ "$(stat -f -c %T /run)" == tmpfs ]] || { echo '/run must be tmpfs.' >&2; exit 1; }
+[[ ! -L /run/cf-optimizer ]] || exit 1
+install -d -m 750 -o cfoptimizer -g cfoptimizer /run/cf-optimizer
+for family in -4 -6; do
+    # A leftover exact rule from a previously killed scan may safely be removed.
+    while ip "$family" rule del pref "$priority" uidrange "$uid-$uid" lookup main 2>/dev/null; do :; done
+    if ip "$family" rule show | grep -q "^$priority:"; then
+        echo "Routing priority $priority is already in use; aborting." >&2; exit 1
+    fi
+done
+trap clean_runtime EXIT
+for family in -4 -6; do ip "$family" rule add pref "$priority" uidrange "$uid-$uid" lookup main; done
+# Verify the IPv4 route really bypasses a tunnel. Rule collisions or missing main
+# routes must fail before any measurements are published.
+route=$(ip -4 route get 104.16.0.1 uid "$uid")
+iface=$(awk '{for(i=1;i<=NF;i++) if($i=="dev") {print $(i+1); exit}}' <<< "$route")
+[[ -n "$iface" && -d "/sys/class/net/$iface/device" ]] || { echo "Route is not through a physical network device: $route" >&2; exit 1; }
+printf 'Scan traffic route: %s\n' "$route"
+child=''
+stop_child() { [[ -z "$child" ]] || kill -TERM "$child" 2>/dev/null || true; [[ -z "$child" ]] || wait "$child" 2>/dev/null || true; exit 143; }
+trap stop_child TERM INT HUP
+timeout --signal=TERM --kill-after=15s 40m runuser -u cfoptimizer -- \
+    env -i PATH="$PATH" HOME=/run/cf-optimizer TMPDIR=/run/cf-optimizer PYTHONDONTWRITEBYTECODE=1 NOTIFY_SOCKET="${NOTIFY_SOCKET:-}" LANG=C.UTF-8 TZ=Asia/Shanghai \
+    /bin/bash /opt/cf-optimizer/run_scan_linux.sh "$mode" &
+child=$!
+status=0
+wait "$child" || status=$?
+if [[ ( "$mode" == --force || "$mode" == --scheduled ) && -f /run/cf-optimizer/report.txt ]]; then
+    # Restore normal Mihomo routing for Telegram after DIRECT measurements.
+    remove_rules
+    runuser -u cfoptimizer -- env -i PATH="$PATH" HOME=/run/cf-optimizer TMPDIR=/run/cf-optimizer PYTHONDONTWRITEBYTECODE=1 NOTIFY_SOCKET="${NOTIFY_SOCKET:-}" LANG=C.UTF-8 TZ=Asia/Shanghai \
+        /bin/bash /opt/cf-optimizer/telegram_notify.sh || status=1
+fi
+exit "$status"
