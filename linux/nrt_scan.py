@@ -31,7 +31,7 @@ THREADS = int(os.environ.get('CFST_THREADS', 50))
 PINGS = int(os.environ.get('CFST_PING_COUNT', 4))
 DOWNLOADS = int(os.environ.get('CFST_DOWNLOAD_COUNT', 5))
 ATTEMPTS = int(os.environ.get('CFST_DOWNLOAD_ATTEMPTS', 20))
-SECONDS = int(os.environ.get('CFST_DOWNLOAD_SECONDS', 3))
+SECONDS = int(os.environ.get('CFST_DOWNLOAD_SECONDS', 5))
 MIN_SPEED = float(os.environ.get('FAST_IP_EXIT_MBPS', 5))
 MAX_LATENCY = float(os.environ.get('FAST_IP_MAX_LATENCY_MS', 250))
 MAX_LOSS = float(os.environ.get('FAST_IP_MAX_LOSS', 0.1))
@@ -161,6 +161,23 @@ def diverse_candidates(rows):
     return [group[i] for i in range(max(map(len, groups.values()), default=0)) for group in groups.values() if i < len(group)]
 
 
+def smoke_target_ips(nets):
+    current = OUTPUT / 'best-ips.txt'
+    choices = current.read_text().splitlines() if current.exists() else []
+    choices += ['172.64.229.194', '172.64.229.92', '172.64.229.85', '172.64.229.125', '172.64.229.95']
+    selected = []
+    for value in choices:
+        try:
+            ip = ipaddress.IPv4Address(value.strip())
+        except ValueError:
+            continue
+        if any(ip in net for net in nets) and str(ip) not in selected:
+            selected.append(str(ip))
+        if len(selected) == 5:
+            break
+    return selected
+
+
 def publish(work, rows, discovered, total, nets, discovery, attempted):
     qualified = [r for r in rows if float(r[5]) >= MIN_SPEED]
     if not qualified:
@@ -252,8 +269,9 @@ def scan(nets, work):
     targets = ','.join(map(str, nets))
     total = sum(n.num_addresses for n in nets)
     if MODE == '--smoke':
-        targets = '172.64.229.194,172.64.229.92,172.64.229.85,172.64.229.125,172.64.229.95'
-        total = 5
+        smoke_ips = smoke_target_ips(nets)
+        targets = ','.join(smoke_ips)
+        total = len(smoke_ips)
     candidates = tcp_probe(targets, total, work, 'fine-scan', True)
     candidates = diverse_candidates(candidates)
     # Every IP in chosen /24s receives a TCP probe. Verify actual colos for a
@@ -267,7 +285,7 @@ def scan(nets, work):
     write_csv(work / 'discovery.csv', discovered)
     if not discovered:
         raise RuntimeError('No verified {} nodes in {}'.format(COLO, targets))
-    selected = diverse_candidates(discovered)[:min(ATTEMPTS, 2 if MODE == '--smoke' else ATTEMPTS)]
+    selected = diverse_candidates(discovered)[:min(ATTEMPTS, 5 if MODE == '--smoke' else ATTEMPTS)]
     rows = []
     attempted = 0
     for i, r in enumerate(selected, 1):
@@ -277,6 +295,8 @@ def scan(nets, work):
         log('Download {}/{}: {} {} MB/s; TCP {}ms; {}'.format(i, len(selected), r[0], r[5], r[4], COLO))
         if speed > 0:
             rows.append(r)
+            if MODE == '--smoke':
+                break
         if sum(float(row[5]) >= MIN_SPEED for row in rows) >= DOWNLOADS:
             break
     if MODE == '--smoke':

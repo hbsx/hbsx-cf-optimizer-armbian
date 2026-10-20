@@ -1,4 +1,5 @@
 import importlib.util
+import ipaddress
 import io
 import json
 import os
@@ -49,6 +50,16 @@ class ScannerTests(unittest.TestCase):
         rows = [row('172.64.229.' + str(i), str(i)) for i in range(1, 6)] + [row('104.16.1.1', '100')]
         selected = self.m.diverse_candidates(rows)
         self.assertEqual([r[0] for r in selected[:2]], ['172.64.229.1', '104.16.1.1'])
+
+    def test_smoke_prefers_current_ips_and_rejects_addresses_outside_cf(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.m.OUTPUT = Path(tmp)
+            (self.m.OUTPUT / 'best-ips.txt').write_text('192.168.1.1\n162.159.44.241\ninvalid\n172.64.229.19\n')
+            nets = [ipaddress.IPv4Network(line) for line in (ROOT / 'ip.txt').read_text().splitlines()]
+            ips = self.m.smoke_target_ips(nets)
+            self.assertEqual(ips[:2], ['162.159.44.241', '172.64.229.19'])
+            self.assertEqual(len(ips), 5)
+            self.assertNotIn('192.168.1.1', ips)
 
     def test_failed_selection_preserves_existing_ip_and_creates_no_report(self):
         with tempfile.TemporaryDirectory() as tmp:
