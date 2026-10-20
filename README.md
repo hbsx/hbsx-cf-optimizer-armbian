@@ -1,6 +1,6 @@
-# Cloudflare NRT 优选 · Armbian / N1
+# Cloudflare NRT 优选 · Armbian / N1 / x86 Linux
 
-面向 ARM64 Armbian 的 Cloudflare 东京 NRT IP 优选工具。只输出 IP 并推送 Telegram，不修改域名 DNS。
+支持 ARM64 Armbian 和 x86 Linux 的 Cloudflare 东京 NRT IP 优选工具。只输出 IP 并推送 Telegram，不修改域名 DNS。
 
 基于 [huangmlj/cf-optimizer](https://github.com/huangmlj/cf-optimizer) 的流程改写，使用官方 [XIU2/CloudflareSpeedTest](https://github.com/XIU2/CloudflareSpeedTest) 测 TCP 延迟，curl 验证地区和下载速度。第三方测速核心在安装时下载，不包含在仓库内。
 
@@ -28,7 +28,17 @@
 
 ## 安装
 
-适用于 ARM64/aarch64，已在 N1、Armbian 25.08 / Ubuntu 24.04、Linux 6.1 上验证基本运行、直连路由、代理 TG 推送与清理。需要 Python3、curl、iproute2、util-linux、systemd；安装器会检查依赖，不自动升级系统。
+支持使用 systemd 的 Armbian、Debian 和 Ubuntu。安装器按 `uname -m` 自动下载对应的官方 Linux 测速核心：
+
+| 架构 | 系统识别值 | 下载版本 |
+| --- | --- | --- |
+| ARM64 | `aarch64`、`arm64` | `cfst_linux_arm64` |
+| x86 64 位 | `x86_64`、`amd64` | `cfst_linux_amd64` |
+| x86 32 位 | `i386`、`i486`、`i586`、`i686`、`x86` | `cfst_linux_386` |
+
+安装和升级时会校验已有测速文件的 ELF 架构；架构不匹配时重新下载，并在替换前验证下载文件。配置和定时运行方式在各架构上相同。这里的 x86 支持面向 Linux，不包含 Windows 或不使用 systemd 的 OpenWrt。
+
+已在 N1、Armbian 25.08 / Ubuntu 24.04、Linux 6.1 上验证基本运行、直连路由、代理 TG 推送与清理；x86 分支提供安装器架构选择和 ELF 校验测试，尚未进行 x86 整机实测。需要 Python3、curl、iproute2、util-linux、systemd；安装器会检查依赖，不自动升级系统。
 
 ```bash
 git clone https://github.com/hbsx/hbsx-cf-optimizer-armbian.git
@@ -86,7 +96,7 @@ sudo systemctl disable --now cf-optimizer.timer
 
 ```bash
 python3 -m unittest discover -s tests -v
-bash -n install.sh linux/cf-optimizer linux/*.sh
+for file in install.sh linux/cf-optimizer linux/*.sh; do bash -n "$file" || exit; done
 ```
 
 MIT License；上游项目及外部测速核心遵循各自许可证。仓库只包含空白配置模板，无设备地址、密码、Bot Token 或 Chat ID。

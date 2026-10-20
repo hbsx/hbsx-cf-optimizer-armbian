@@ -1,30 +1,37 @@
 #!/bin/bash
-# Install/update the scan-only Armbian edition. Preserve existing credentials.
+# Install/update the scan-only Linux edition. Preserve existing credentials.
 set -euo pipefail
 umask 027
 [[ $EUID == 0 ]] || { echo 'Please run with sudo.' >&2; exit 1; }
-[[ $(uname -m) == aarch64 ]] || { echo 'This installer currently supports ARM64/aarch64.' >&2; exit 1; }
 [[ $(stat -f -c %T /run) == tmpfs ]] || { echo '/run must be a RAM filesystem.' >&2; exit 1; }
 src=$(cd "$(dirname "$0")" && pwd)
 dst=/opt/cf-optimizer
 for command in curl python3 ip flock runuser install tar systemctl useradd; do
     command -v "$command" >/dev/null || { echo "Missing dependency: $command" >&2; exit 1; }
 done
+test -f "$src/tools/install_platform.py" || { echo 'Missing source: tools/install_platform.py' >&2; exit 1; }
+machine=$(uname -m)
+cfst_arch=$(python3 "$src/tools/install_platform.py" "$machine")
+cfst_dir="cfst_linux_${cfst_arch}"
+printf 'Detected architecture: %s; cfst platform: %s\n' "$machine" "$cfst_arch"
 for file in cf-optimizer nrt_scan.py run_scan_linux.sh telegram_notify.py telegram_notify.sh env.linux.sh.example cf-optimizer.service cf-optimizer.timer; do
     test -f "$src/linux/$file" || { echo "Missing source: linux/$file" >&2; exit 1; }
 done
 tmp=$(mktemp -d /run/cf-optimizer-install.XXXXXXXX)
 trap 'rm -rf -- "$tmp"' EXIT
-if [[ ! -x "$dst/cfst" ]]; then
+if [[ ! -x "$dst/cfst" ]] || ! python3 "$src/tools/install_platform.py" "$machine" --check-binary "$dst/cfst"; then
     curl -fL --connect-timeout 10 --max-time 180 --retry 2 \
-        https://github.com/XIU2/CloudflareSpeedTest/releases/download/v2.3.5/cfst_linux_arm64.tar.gz -o "$tmp/cfst.tar.gz"
-    tar -xzf "$tmp/cfst.tar.gz" -C "$tmp" cfst_linux_arm64/cfst
+        "https://github.com/XIU2/CloudflareSpeedTest/releases/download/v2.3.5/${cfst_dir}.tar.gz" -o "$tmp/cfst.tar.gz"
+    tar -xzf "$tmp/cfst.tar.gz" -C "$tmp" "$cfst_dir/cfst"
+    python3 "$src/tools/install_platform.py" "$machine" --check-binary "$tmp/$cfst_dir/cfst" || {
+        echo 'Downloaded binary does not match the detected architecture.' >&2; exit 1;
+    }
 fi
 systemctl stop cf-optimizer.service 2>/dev/null || true
 getent passwd cfoptimizer >/dev/null || useradd --system --home-dir /run/cf-optimizer --shell /usr/sbin/nologin cfoptimizer
 install -d -o root -g cfoptimizer -m 750 "$dst"
-if [[ -f "$tmp/cfst_linux_arm64/cfst" ]]; then
-    install -o root -g root -m 755 "$tmp/cfst_linux_arm64/cfst" "$dst/cfst"
+if [[ -f "$tmp/$cfst_dir/cfst" ]]; then
+    install -o root -g root -m 755 "$tmp/$cfst_dir/cfst" "$dst/cfst"
 fi
 for file in nrt_scan.py run_scan_linux.sh telegram_notify.py telegram_notify.sh env.linux.sh.example; do
     install -o root -g cfoptimizer -m 640 "$src/linux/$file" "$dst/$file"

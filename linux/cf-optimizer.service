@@ -1,5 +1,5 @@
 [Unit]
-Description=Cloudflare NRT IP selection (Armbian, no DNS updates)
+Description=Cloudflare NRT IP selection (Linux, no DNS updates)
 Wants=network-online.target
 After=network-online.target mihomo.service
 
