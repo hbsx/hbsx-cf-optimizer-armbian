@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 import unittest
 import urllib.error
+import subprocess
+import types
 from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -44,17 +46,20 @@ class FakeCloudflare:
 
     def replace(self, records, ips):
         self.writes.append((copy.deepcopy(records), ips[:]))
-        for item, ip in zip(self.current, ips):
-            item['content'] = ip
+        changes = {record['id']: ip for record, ip in zip(records, ips)}
+        for item in self.current:
+            if item['id'] in changes:
+                item['content'] = changes[item['id']]
 
 
 class DNSTests(unittest.TestCase):
-    def run_comparison(self, rounds, candidates=None, client=None):
+    def run_comparison(self, rounds, candidates=None, client=None, pings=None):
         client = client or FakeCloudflare()
         measurement = Mock(side_effect=rounds)
         sleeper = Mock()
+        health = Mock(side_effect=pings if pings is not None else lambda ips: {ip: True for ip in ips})
         with patch.dict(os.environ, ENV, clear=True):
-            report = dns.compare_and_update(candidates or [NEW], client=client, measure=measurement, sleep=sleeper)
+            report = dns.compare_and_update(candidates or [NEW], client=client, measure=measurement, sleep=sleeper, ping_measure=health)
         return '\n'.join(report), client, measurement, sleeper
 
     def test_disabled_does_not_contact_cloudflare_or_probe(self):
@@ -100,15 +105,85 @@ class DNSTests(unittest.TestCase):
     def test_insufficient_candidates_or_existing_ips_never_replaced_with_duplicates(self):
         for candidates in ([OLD], [NEW, NEW]):
             client = FakeCloudflare([record(), record('172.64.229.2', 2)])
-            _, client, measure, _ = self.run_comparison([], candidates, client)
+            old2 = '172.64.229.2'
+            _, client, measure, _ = self.run_comparison([{OLD: 100, old2: 105, NEW: 80}] * 2, candidates, client)
             self.assertFalse(client.writes)
-            measure.assert_not_called()
+            if candidates == [OLD]:
+                measure.assert_not_called()
 
     def test_incomplete_old_measurements_prevent_updates(self):
         for value in (None, math.nan, math.inf, 0):
             with self.subTest(value=value):
-                _, client, _, _ = self.run_comparison([{OLD: value, NEW: 50}])
+                _, client, _, _ = self.run_comparison([{OLD: value, NEW: 50}] * 2)
                 self.assertFalse(client.writes)
+
+    def test_two_ping_failures_replace_old_ip_without_latency_threshold(self):
+        report, client, measure, sleep = self.run_comparison(
+            [{OLD: None, NEW: 80}, {OLD: None, NEW: 85}],
+            pings=[{OLD: False, NEW: True}] * 2)
+        self.assertIn('故障切换', report)
+        self.assertIn('DNS 已更新', report)
+        self.assertEqual(client.current[0]['content'], NEW)
+        self.assertEqual(measure.call_count, 2)
+        sleep.assert_called_once_with(30)
+
+    def test_ping_is_the_requested_failover_trigger_even_when_tcp_replies(self):
+        report, client, _, _ = self.run_comparison([{OLD: 60, NEW: 65}] * 2,
+                                                pings=[{OLD: False, NEW: True}] * 2)
+        self.assertIn('故障切换', report)
+        self.assertEqual(client.current[0]['content'], NEW)
+
+    def test_one_failed_ping_then_recovery_does_not_trigger_failover(self):
+        report, client, _, _ = self.run_comparison([{OLD: None, NEW: 80}] * 2,
+                                                pings=[{OLD: False, NEW: True}, {OLD: True, NEW: True}])
+        self.assertNotIn('DNS 已更新', report)
+        self.assertFalse(client.writes)
+
+    def test_ping_error_is_not_treated_as_confirmed_unreachable(self):
+        _, client, _, _ = self.run_comparison([{OLD: None, NEW: 80}] * 2,
+                                             pings=[{OLD: None, NEW: True}] * 2)
+        self.assertFalse(client.writes)
+
+    def test_failover_requires_same_new_ip_ping_and_tcp_healthy_both_rounds(self):
+        cases = [([{OLD: None, NEW: 80}] * 2, [{OLD: False, NEW: True}, {OLD: False, NEW: False}]),
+                 ([{OLD: None, NEW: 80}, {OLD: None, NEW: None}], [{OLD: False, NEW: True}] * 2),
+                 ([{OLD: None, NEW: 80}] * 2, [{OLD: False, NEW: False}] * 2)]
+        for rounds, pings in cases:
+            with self.subTest(rounds=rounds, pings=pings):
+                _, client, _, _ = self.run_comparison(rounds, pings=pings)
+                self.assertFalse(client.writes)
+
+    def test_failover_only_replaces_failed_records_and_keeps_healthy_record(self):
+        old2 = '172.64.229.2'
+        client = FakeCloudflare([record(), record(old2, 2)])
+        rounds = [{OLD: 100, old2: None, NEW: 110}] * 2
+        pings = [{OLD: True, old2: False, NEW: True}] * 2
+        report, client, _, _ = self.run_comparison(rounds, client=client, pings=pings)
+        self.assertIn('故障切换', report)
+        self.assertEqual([r['content'] for r in client.current], [OLD, NEW])
+        self.assertEqual([r['id'] for r in client.writes[0][0]], [record(old2, 2)['id']])
+        self.assertTrue(all(r['ttl'] == 300 for r in client.current))
+
+    def test_failover_rejects_changed_records_and_unconfirmed_readback(self):
+        for changed in (True, False):
+            client = FakeCloudflare()
+            client.edit_during_compare = changed
+            client.failed_readback = not changed
+            report, client, _, _ = self.run_comparison([{OLD: None, NEW: 80}] * 2, client=client,
+                                                      pings=[{OLD: False, NEW: True}] * 2)
+            self.assertNotIn('DNS 已更新', report)
+            self.assertEqual(len(client.writes), 0 if changed else 1)
+
+    def test_ping_exit_status_and_local_errors_are_distinguished_without_logs(self):
+        for code, expected in ((0, True), (1, False), (2, None), (-9, None)):
+            with self.subTest(code=code), patch.object(dns.subprocess, 'run', return_value=types.SimpleNamespace(returncode=code)) as run:
+                self.assertIs(dns.ping(OLD), expected)
+                self.assertEqual(run.call_args.args[0], ['ping', '-4', '-n', '-c', '1', '-W', '2', '-w', '3', OLD])
+                self.assertIs(run.call_args.kwargs['stdout'], subprocess.DEVNULL)
+                self.assertIs(run.call_args.kwargs['stderr'], subprocess.DEVNULL)
+        for error in (FileNotFoundError(), subprocess.TimeoutExpired('ping', 5)):
+            with patch.object(dns.subprocess, 'run', side_effect=error):
+                self.assertIsNone(dns.ping(OLD))
 
     def test_incomplete_new_measurements_do_not_satisfy_threshold(self):
         for value in (None, math.nan, math.inf, 0):

@@ -6,7 +6,7 @@ umask 027
 [[ $(stat -f -c %T /run) == tmpfs ]] || { echo '/run must be a RAM filesystem.' >&2; exit 1; }
 src=$(cd "$(dirname "$0")" && pwd)
 dst=/opt/cf-optimizer
-for command in curl python3 ip flock runuser install tar systemctl useradd; do
+for command in curl python3 ip ping flock runuser install tar systemctl useradd; do
     command -v "$command" >/dev/null || { echo "Missing dependency: $command" >&2; exit 1; }
 done
 test -f "$src/tools/install_platform.py" || { echo 'Missing source: tools/install_platform.py' >&2; exit 1; }

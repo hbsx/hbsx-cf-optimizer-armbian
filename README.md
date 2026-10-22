@@ -1,6 +1,6 @@
 # Cloudflare NRT 优选 · Armbian / N1 / x86 Linux
 
-支持 ARM64 Armbian 和 x86 Linux 的 Cloudflare 东京 NRT IP 优选工具。优选 IP 并推送 Telegram，可选在两轮延迟比较达标后自动更新 Cloudflare DNS。
+支持 ARM64 Armbian 和 x86 Linux 的 Cloudflare 东京 NRT IP 优选工具。优选 IP 并推送 Telegram，可选在两轮延迟比较达标或确认旧 IP ping 故障后自动更新 Cloudflare DNS。
 
 基于 [huangmlj/cf-optimizer](https://github.com/huangmlj/cf-optimizer) 的流程改写，使用官方 [XIU2/CloudflareSpeedTest](https://github.com/XIU2/CloudflareSpeedTest) 测 TCP 延迟，curl 验证地区和下载速度。第三方测速核心在安装时下载，不包含在仓库内。
 
@@ -13,7 +13,7 @@
 - **TG 走代理**：明确使用本机 Mihomo 的 `http://127.0.0.1:7890`，可配置。
 - 最多复测 20 个下载候选，找到 5 个达标 IP 后结束。默认每个约 5 秒、速度 ≥5 MB/s、TCP 延迟 ≤250ms、TCP 丢包率 ≤0.1。
 - 下载接口返回 **429 时立即停止请求**，保留已有 IP，并尝试推送失败原因，不把失败或旧结果当成本次结果。
-- DNS 自动更新默认关闭。启用后，同一个新 IP 必须在连续两轮中都比域名当前最快 IP 的延迟低至少 **10%**，才允许更新。
+- DNS 自动更新默认关闭。启用后，正常优选要求同一个新 IP 连续两轮比旧最快 IP 的延迟低至少 **10%**；故障切换则要求旧 IP 连续两轮 ping 不通、新 IP 两轮 ping 和 TCP 均正常。
 
 ## eMMC 与临时文件
 
@@ -40,7 +40,7 @@
 
 安装和升级时会校验已有测速文件的 ELF 架构；架构不匹配时重新下载，并在替换前验证下载文件。配置和定时运行方式在各架构上相同。这里的 x86 支持面向 Linux，不包含 Windows 或不使用 systemd 的 OpenWrt。
 
-已在 N1、Armbian 25.08 / Ubuntu 24.04、Linux 6.1 上验证基本运行、直连路由、代理 TG 推送与清理；x86 分支提供安装器架构选择和 ELF 校验测试，尚未进行 x86 整机实测。需要 Python3、curl、iproute2、util-linux、systemd；安装器会检查依赖，不自动升级系统。
+已在 N1、Armbian 25.08 / Ubuntu 24.04、Linux 6.1 上验证基本运行、直连路由、代理 TG 推送与清理；x86 分支提供安装器架构选择和 ELF 校验测试，尚未进行 x86 整机实测。需要 Python3、curl、iproute2、iputils-ping、util-linux、systemd；安装器会检查依赖，不自动升级系统。
 
 ```bash
 git clone https://github.com/hbsx/hbsx-cf-optimizer-armbian.git
@@ -63,7 +63,7 @@ TELEGRAM_PROXY_URL="http://127.0.0.1:7890"
 
 Mihomo 的本地代理端口应允许此用户连接。如果默认网关本身也有代理，需另外确保测速出站为直连。本工具只保证绕过**本机**的 TUN。
 
-## 两轮比较后更新 DNS
+## 两轮比较与故障切换
 
 在 `/opt/cf-optimizer/env.sh` 填写自己的域名和凭据，凭据只保存在设备上：
 
@@ -79,18 +79,18 @@ Token 只需目标 Zone 的 DNS 编辑权限，Zone ID 在 Cloudflare 域名概�
 
 每次完整优选成功后，从 Cloudflare API 读取**精确域名**当前的 A 记录内容，不使用公共解析结果，以免受到缓存、橙云或 Mihomo 假 IP 干扰：
 
-1. 对域名旧 IP 和本轮通过 NRT、速度门槛的新候选，各做 5 次直连 TCP 连接，取中位延迟。旧 IP 有多个时，以其中最快值为比较基准。
-2. 等 30 秒，以同样方法再测一轮。新 IP 每轮必须满足 `新延迟 ≤ 当轮旧最快延迟 × 0.90`；必须是**同一个 IP** 连续两轮达标。
-3. 保留现有 A 记录数量，从两轮达标的新 IP 中选最快的一组，用 [Cloudflare 批量修改接口](https://developers.cloudflare.com/api/resources/dns/subresources/records/methods/batch/) 只修改记录内容，保留 TTL、备注等属性。需要至少与旧记录同样多的达标新 IP，候选不足则整组不更新。
+1. 对域名旧 IP 和本轮通过 NRT、速度门槛的新候选，各做 5 次直连 TCP 连接，取中位延迟，并各发一次真实 ICMP ping。ping 最多等待 2 秒，输出直接丢弃。旧 IP 有多个时，正常延迟比较以其中最快值为基准。
+2. 等 30 秒，以同样方法再测一轮。**正常优选**要求同一个新 IP 每轮都满足 `新延迟 ≤ 当轮旧最快延迟 × 0.90`。**故障切换**要求同一个旧 IP 两轮 ping 都无响应，且同一个新 IP 两轮 ping 均成功、所有 TCP 测量均成功；故障切换不要求快 10%。
+3. 保留现有 A 记录数量，用 [Cloudflare 批量修改接口](https://developers.cloudflare.com/api/resources/dns/subresources/records/methods/batch/) 只修改记录内容，保留 TTL、备注等属性。正常优选需足够的新 IP 整组替换；故障切换优先，只替换确认失败的记录，其他记录保留。两种情况都从符合对应条件的候选中选择两轮平均延迟最低的一组，候选不足则本轮不提交更新。
 4. 写入前重新读取并核对记录，若比较期间发生变化则跳过；写入后再次读取确认。请求或读回失败不会自动重试写入，TG 会明确显示结果未确认。
 
-只处理已有、DNS-only（灰云）的 A 记录，不新增或删除记录，不修改 AAAA/CNAME。旧 IP 测量不完整、域名没有 A 记录、橙云、API 失败或未达到阈值，都不会提交 DNS 更新。Cloudflare 批量请求在数据库中事务执行，但全球 DNS 传播并非同时完成。`--smoke` 和 `--check` 都不更新 DNS。
+只处理已有、DNS-only（灰云）的 A 记录，不新增或删除记录，不修改 AAAA/CNAME。ping 仅失败一轮或第二轮恢复时，不触发故障切换；ping 缺失、权限错误或进程异常也不算“IP 不通”。新旧 IP 全部 ping 不通时，不触发故障切换，避免本地网络异常引起误改。旧 TCP 测量不完整且未确认两轮 ping 故障、没有 A 记录、橙云或 API 失败时，保留解析。Cloudflare 批量请求在数据库中事务执行，但全球 DNS 传播并非同时完成。`--smoke` 和 `--check` 都不更新 DNS。
 
-TG 报告包含两轮对比和“已更新 / 未更新 / 结果未确认”状态，报告发送后删除，不保存比较历史。
+TG 报告包含两轮延迟、旧 IP 的 ping 结果，以及“延迟优化 / 故障切换 / 未更新 / 结果未确认”状态。报告发送后删除，不保存比较历史。
 
 10% 是本项目为减少频繁切换采用的策略值。旧 IP 延迟为 60 ms 时，新 IP 两轮都需要不高于 54 ms；仅快约 1 ms 不会触发更新。延迟会受排队等因素影响（参见 [IETF 延迟变化说明](https://www.rfc-editor.org/rfc/rfc5481.html)），两轮各 5 次取中位数可以减少偶然波动的影响，但不能保证整天或不同运营商下的表现。
 
-当前规则用于比较延迟，不包含旧 IP 失联时的自动故障切换：旧记录任何 IP 测量不完整，均保留解析并在 TG 中说明。两轮发生在同一次优选结束后，间隔 30 秒；不是跨两次三天周期确认。
+两轮发生在同一次优选结束后，间隔 30 秒，不是跨两次三天周期确认，也不是全天实时监控。故障切换按真实 ICMP ping 的结果触发；某 IP 禁止 ICMP 回包时，也会被视为 ping 不通。
 
 ## 使用
 

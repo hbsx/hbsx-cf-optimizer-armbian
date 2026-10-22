@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Two direct TCP comparison rounds before changing existing Cloudflare A records."""
+"""Two direct comparison rounds, including ICMP failover, before DNS changes."""
 import concurrent.futures as futures
 import ipaddress
 import json
@@ -8,6 +8,7 @@ import os
 import re
 import socket
 import statistics
+import subprocess
 import time
 import urllib.error
 import urllib.parse
@@ -116,7 +117,7 @@ def latency(ip, port):
                 connection.connect((ip, port))
             samples.append((time.monotonic() - started) * 1000)
         except OSError:
-            # No automatic replacement when either side has missing samples.
+            # Incomplete TCP samples cannot satisfy the normal latency rule.
             return None
         time.sleep(0.1)
     result = statistics.median(samples)
@@ -129,12 +130,33 @@ def measure_round(ips, port):
         return {ip: job.result() for ip, job in jobs.items()}
 
 
+def ping(ip):
+    """One bounded ICMP echo: True=reply, False=no reply, None=local error."""
+    ip = str(ipaddress.IPv4Address(ip))
+    try:
+        result = subprocess.run(['ping', '-4', '-n', '-c', '1', '-W', '2', '-w', '3', ip],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return {0: True, 1: False}.get(result.returncode)
+
+
+def ping_round(ips):
+    with futures.ThreadPoolExecutor(max_workers=min(16, len(ips))) as pool:
+        jobs = {ip: pool.submit(ping, ip) for ip in ips}
+        return {ip: job.result() for ip, job in jobs.items()}
+
+
+def valid_latency(value):
+    return value is not None and math.isfinite(value) and value > 0
+
+
 def better(new, old):
     return (new is not None and old is not None and math.isfinite(new) and math.isfinite(old)
             and new > 0 and old > 0 and new <= old * (1 - MIN_IMPROVEMENT))
 
 
-def compare_and_update(candidates, port=443, log=lambda message: None, client=None, measure=None, sleep=None):
+def compare_and_update(candidates, port=443, log=lambda message: None, client=None, measure=None, sleep=None, ping_measure=None):
     """Return report lines. All decisions and comparison samples stay in memory."""
     lines = []
     attempted_write = False
@@ -144,48 +166,70 @@ def compare_and_update(candidates, port=443, log=lambda message: None, client=No
             return ['DNS：自动更新未启用，保留现有解析。']
         client = client or Cloudflare(*settings)
         measure = measure or measure_round
+        ping_measure = ping_measure or ping_round
         sleep = sleep or time.sleep
         records = client.records()
         old_ips = [record['content'] for record in records]
         # Never replace a DNS address with itself based on measurement noise.
         new_ips = list(dict.fromkeys(str(ipaddress.IPv4Address(ip)) for ip in candidates if ip not in old_ips))
-        if len(new_ips) < len(records):
-            return ['DNS：新候选不足以保留现有 {} 条 A 记录，本轮不更新。'.format(len(records))]
+        if not new_ips:
+            return ['DNS：没有可替换的新 IP，本轮保留现有解析。']
         eligible = set(new_ips)
         scores = {ip: [] for ip in new_ips}
-        lines.append('DNS 比较：{}，旧记录取最快 IP；两轮均至少快 10%。'.format(settings[2]))
+        ping_results = []
+        normal_ok = True
+        lines.append('DNS 比较：{}；正常优选需两轮至少快 10%，旧 IP 两轮 ping 不通则故障切换。'.format(settings[2]))
         for round_number in (1, 2):
             log('DNS latency comparison round {}/2'.format(round_number))
             measured = measure(old_ips + new_ips, port)
+            health = ping_measure(old_ips + new_ips)
+            ping_results.append(health)
             old_values = [measured.get(ip) for ip in old_ips]
-            if any(value is None or not math.isfinite(value) or value <= 0 for value in old_values):
-                return lines + ['DNS：旧 IP 测量不完整，无法可靠比较，本轮不更新。']
-            old_best = min(old_values)
-            passed = {ip for ip in new_ips if better(measured.get(ip), old_best)}
+            complete = all(valid_latency(value) for value in old_values)
+            normal_ok &= complete
+            old_best = min(old_values) if complete else None
+            passed = {ip for ip in new_ips if better(measured.get(ip), old_best)} if complete else set()
             eligible &= passed
             for ip in new_ips:
                 value = measured.get(ip)
-                if value is not None and math.isfinite(value) and value > 0:
+                if valid_latency(value):
                     scores[ip].append(value)
-            values = [measured.get(ip) for ip in new_ips if measured.get(ip) is not None and math.isfinite(measured[ip]) and measured[ip] > 0]
+            values = [measured.get(ip) for ip in new_ips if valid_latency(measured.get(ip))]
             new_text = '{:.2f} ms'.format(min(values)) if values else '不可用'
-            old_best_ip = min(old_ips, key=lambda ip: measured[ip])
-            lines.append('第 {} 轮：旧最快 {} {:.2f} ms；新最快 {}；本轮 {} 个达标。'.format(round_number, old_best_ip, old_best, new_text, len(passed)))
+            old_text = '{} {:.2f} ms'.format(min(old_ips, key=lambda ip: measured[ip]), old_best) if complete else '旧 IP TCP 测量不完整'
+            ping_text = ' / '.join('{} {}'.format(ip, {True: '通', False: '不通', None: '检查异常'}.get(health.get(ip), '检查异常')) for ip in old_ips)
+            lines.append('第 {} 轮：旧最快 {}；新最快 {}；本轮 {} 个延迟达标。'.format(round_number, old_text, new_text, len(passed)))
+            lines.append('旧 IP ping（第 {} 轮）：{}'.format(round_number, ping_text))
             if round_number == 1:
                 sleep(ROUND_GAP)
-        if len(eligible) < len(records):
-            return lines + ['DNS：连续两轮达标的新 IP 不足，本轮保留现有解析。']
-        selected = sorted(eligible, key=lambda ip: (statistics.mean(scores[ip]), ip))[:len(records)]
+        failed = [record for record in records if all(health.get(record['content']) is False for health in ping_results)]
+        if failed:
+            # Require the same new IP to reply to ICMP and complete all TCP
+            # samples in both rounds. An ICMP-wide outage cannot trigger failover.
+            available = {ip for ip in new_ips if len(scores[ip]) == 2 and all(health.get(ip) is True for health in ping_results)}
+            if len(available) < len(failed):
+                return lines + ['DNS：旧 IP 两轮 ping 不通，但两轮 ping/TCP 均正常的新 IP 不足，保留现有解析。']
+            replacements = failed
+            reason = '故障切换：旧 IP 连续两轮 ping 不通'
+        else:
+            if not normal_ok:
+                return lines + ['DNS：旧 IP TCP 测量不完整，且未确认连续两轮 ping 不通，本轮保留现有解析。']
+            if len(eligible) < len(records):
+                return lines + ['DNS：连续两轮达标的新 IP 不足，本轮保留现有解析。']
+            replacements, available = records, eligible
+            reason = '延迟优化：连续两轮均至少快 10%'
+        selected = sorted(available, key=lambda ip: (statistics.mean(scores[ip]), ip))[:len(replacements)]
         # Refuse to overwrite edits made while the comparisons were running.
         if fingerprint(client.records()) != fingerprint(records):
             return lines + ['DNS：比较期间记录已变化，本轮不更新。']
         attempted_write = True
-        client.replace(records, selected)
-        expected = {record['id']: ip for record, ip in zip(records, selected)}
+        client.replace(replacements, selected)
+        expected = {record['id']: record['content'] for record in records}
+        expected.update({record['id']: ip for record, ip in zip(replacements, selected)})
         actual = {record['id']: record['content'] for record in client.records()}
         if actual != expected:
             raise DNSProblem('Cloudflare readback did not match the requested addresses')
-        return lines + ['✅ DNS 已更新（{} 条 A 记录）：{}'.format(len(selected), ' / '.join(selected))]
+        return lines + ['✅ DNS 已更新（{} 条 A 记录，{}）：{}'.format(len(selected), reason, ' / '.join(selected))]
     except Exception as error:
         # Never expose raw API bodies, request headers or tokens in the report.
         reason = str(error) if isinstance(error, DNSProblem) else 'DNS 比较或请求失败'
