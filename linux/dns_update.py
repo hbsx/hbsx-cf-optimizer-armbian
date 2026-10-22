@@ -156,7 +156,7 @@ def better(new, old):
             and new > 0 and old > 0 and new <= old * (1 - MIN_IMPROVEMENT))
 
 
-def compare_and_update(candidates, port=443, log=lambda message: None, client=None, measure=None, sleep=None, ping_measure=None):
+def compare_and_update(candidates, port=443, log=lambda message: None, client=None, measure=None, sleep=None, ping_measure=None, failover_only=False):
     """Return report lines. All decisions and comparison samples stay in memory."""
     lines = []
     attempted_write = False
@@ -212,6 +212,8 @@ def compare_and_update(candidates, port=443, log=lambda message: None, client=No
             replacements = failed
             reason = '故障切换：旧 IP 连续两轮 ping 不通'
         else:
+            if failover_only:
+                return lines + ['DNS：复核时未确认旧 IP 连续故障，轻量检查保留现有解析。']
             if not normal_ok:
                 return lines + ['DNS：旧 IP TCP 测量不完整，且未确认连续两轮 ping 不通，本轮保留现有解析。']
             if len(eligible) < len(records):

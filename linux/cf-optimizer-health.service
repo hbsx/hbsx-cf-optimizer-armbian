@@ -1,0 +1,24 @@
+[Unit]
+Description=Six-hour CF DNS IP health check and conditional failover
+Wants=network-online.target
+After=network-online.target mihomo.service
+
+[Service]
+Type=oneshot
+NotifyAccess=all
+ExecStart=/usr/local/sbin/cf-optimizer --health
+ExecStopPost=/usr/local/sbin/cf-optimizer cleanup-health
+TimeoutStartSec=46min
+TimeoutStopSec=30s
+KillMode=control-group
+Nice=10
+IOSchedulingClass=idle
+StandardOutput=null
+StandardError=null
+LogLevelMax=0
+ProtectSystem=strict
+ReadWritePaths=/run
+ProtectHome=true
+MemoryMax=256M
+MemorySwapMax=0
+LimitCORE=0

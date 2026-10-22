@@ -3,8 +3,12 @@
 set -euo pipefail
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 [[ $EUID == 0 ]] || { echo 'Run with sudo.' >&2; exit 1; }
+mode="${1:---force}"
 exec 9>/run/lock/cf-optimizer.lock
-flock -n 9 || { echo 'Another scan is running.' >&2; exit 1; }
+if ! flock -n 9; then
+    [[ "$mode" == --health || "$mode" == cleanup-health ]] && exit 0
+    echo 'Another scan is running.' >&2; exit 1
+fi
 uid=$(id -u cfoptimizer)
 priority=8990
 remove_rules() {
@@ -18,9 +22,8 @@ clean_runtime() {
         find /run/cf-optimizer -mindepth 1 -maxdepth 1 ! -name best-ips.txt -exec rm -rf -- {} +
     fi
 }
-if [[ "${1:-}" == cleanup ]]; then clean_runtime; exit 0; fi
-mode="${1:---force}"
-case "$mode" in --check|--smoke|--force|--scheduled|--schedule-check) ;; *) echo 'Usage: cf-optimizer [--check|--smoke|--force|--scheduled|--schedule-check]' >&2; exit 2;; esac
+if [[ "$mode" == cleanup || "$mode" == cleanup-health ]]; then clean_runtime; exit 0; fi
+case "$mode" in --check|--smoke|--force|--scheduled|--schedule-check|--health) ;; *) echo 'Usage: cf-optimizer [--check|--smoke|--force|--scheduled|--schedule-check|--health]' >&2; exit 2;; esac
 if [[ "$mode" == --scheduled || "$mode" == --schedule-check ]]; then
     due=0
     runuser -u cfoptimizer -- env -i PATH="$PATH" PYTHONDONTWRITEBYTECODE=1 TZ=Asia/Shanghai \
@@ -40,6 +43,8 @@ for family in -4 -6; do
     fi
 done
 trap clean_runtime EXIT
+# Remove stale reports from an interrupted run before a quiet health check.
+clean_runtime
 for family in -4 -6; do ip "$family" rule add pref "$priority" uidrange "$uid-$uid" lookup main; done
 # Verify the IPv4 route really bypasses a tunnel. Rule collisions or missing main
 # routes must fail before any measurements are published.
@@ -56,7 +61,15 @@ timeout --signal=TERM --kill-after=15s 40m runuser -u cfoptimizer -- \
 child=$!
 status=0
 wait "$child" || status=$?
-if [[ ( "$mode" == --force || "$mode" == --scheduled ) && -f /run/cf-optimizer/report.txt ]]; then
+child=''
+if [[ "$mode" == --health && "$status" == 75 ]]; then
+    # Close the inherited lock before the forced refresh acquires it again.
+    clean_runtime
+    trap - EXIT TERM INT HUP
+    exec 9>&-
+    exec /usr/local/sbin/cf-optimizer --force
+fi
+if [[ ( "$mode" == --force || "$mode" == --scheduled || "$mode" == --health ) && -f /run/cf-optimizer/report.txt ]]; then
     # Restore normal Mihomo routing for Telegram after DIRECT measurements.
     remove_rules
     runuser -u cfoptimizer -- env -i PATH="$PATH" HOME=/run/cf-optimizer TMPDIR=/run/cf-optimizer PYTHONDONTWRITEBYTECODE=1 NOTIFY_SOCKET="${NOTIFY_SOCKET:-}" LANG=C.UTF-8 TZ=Asia/Shanghai \

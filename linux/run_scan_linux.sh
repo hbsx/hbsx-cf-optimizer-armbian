@@ -9,4 +9,5 @@ set +a
 export LC_ALL=C.UTF-8
 export PYTHONDONTWRITEBYTECODE=1
 if [[ "${1:-}" == --schedule-check ]]; then exec python3 ./schedule.py; fi
+if [[ "${1:-}" == --health ]]; then exec python3 ./health_check.py; fi
 exec python3 ./nrt_scan.py "${1:---force}"

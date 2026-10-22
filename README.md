@@ -7,6 +7,7 @@
 ## 默认行为
 
 - 默认每 **3 天、北京时间 03:00** 运行一次；关机时错过的任务不补跑。
+- 独立健康检查每天北京时间 **00:00、06:00、12:00、18:00** 运行。旧 IP 正常时每个只 ping 一次，不做 TCP 测速、下载或全网扫描，不生成报告，不推送 TG。
 - 覆盖 Cloudflare 官方全部 IPv4 网段，先逐 `/24` 采样发现 NRT，再完整细扫最多 8 个候选 `/24`（2048 IP）。不是逐个扫描全部约 152 万个地址。
 - 地区验证必须返回 `colo=NRT`，下载响应 `CF-RAY` 也必须属于 NRT。
 - **测速直连**：独立系统用户临时查询主路由表，绕过本机 Mihomo TUN；不停止代理、不修改其配置。
@@ -53,6 +54,8 @@ sudo nano /opt/cf-optimizer/env.sh
 
 `CFST_SCHEDULE_DAYS=3` 表示每三天运行；安装器首次写入 `CFST_SCHEDULE_ANCHOR` 为当天北京时间日期。例如起始日为 2026-10-22，则运行日期为 10-22、10-25、10-28、10-31、11-03，均为凌晨 3 点。安装时若已过凌晨 3 点，等待下一个周期。升级不会重置已有起始日。定时器每天凌晨只检查日期，非运行日直接退出，不扫描或推送。重启和跨月不会改变周期。
 
+安装器同时启用 `cf-optimizer-health.timer`，每 6 小时检查 DNS 旧 IP。两个任务共用运行锁，完整优选期间的健康检查会跳过，不会互相清理运行数据。健康检查的临时数据仍只允许写 `/run`，不保存日志或历史结果。
+
 填写自己的 Telegram 配置，勿上传真实配置：
 
 ```bash
@@ -90,7 +93,11 @@ TG 报告包含两轮延迟、旧 IP 的 ping 结果，以及“延迟优化 / �
 
 10% 是本项目为减少频繁切换采用的策略值。旧 IP 延迟为 60 ms 时，新 IP 两轮都需要不高于 54 ms；仅快约 1 ms 不会触发更新。延迟会受排队等因素影响（参见 [IETF 延迟变化说明](https://www.rfc-editor.org/rfc/rfc5481.html)），两轮各 5 次取中位数可以减少偶然波动的影响，但不能保证整天或不同运营商下的表现。
 
-两轮发生在同一次优选结束后，间隔 30 秒，不是跨两次三天周期确认，也不是全天实时监控。故障切换按真实 ICMP ping 的结果触发；某 IP 禁止 ICMP 回包时，也会被视为 ping 不通。
+完整优选中的两轮发生在同一次扫描结束后，间隔 30 秒，不是跨两次三天周期确认。故障切换按真实 ICMP ping 的结果触发；某 IP 禁止 ICMP 回包时，也会被视为 ping 不通。
+
+每 6 小时的独立健康检查遵循以下流程：旧 IP 首次 ping 不通后等 30 秒复查；确认两次均不通，才读取 RAM 中的备用 IP，并重新验证 NRT 地区、TCP 延迟和下载速度。备用合格后再次执行两轮 ping/TCP 故障复核，只允许故障切换，不对健康记录做 10% 延迟优化。若复核时旧 IP 恢复，则保留解析。
+
+重启会清空 RAM 备用列表。确认故障但没有足够的合格备用 IP 时，会提前启动一轮完整优选，完成后按原有规则决定更新，不改变三天周期。测速接口限流或检查执行异常时会停止并报告，不反复启动扫描。健康时不推送；确认故障后的处理结果或检查错误会通过 TG 发送，随后删除本地报告。故障发现可能等待接近 6 小时，备用验证、完整扫描和 DNS 缓存会增加恢复时间。
 
 ## 使用
 
@@ -101,6 +108,8 @@ sudo cf-optimizer --check
 sudo systemctl start --no-block cf-optimizer
 # 忽略周期，立即在前台完整优选、比较并推送
 sudo cf-optimizer --force
+# 手动执行一次轻量健康检查
+sudo systemctl start --no-block cf-optimizer-health
 # 查看运行状态（systemd 内存状态，不创建日志文件）
 systemctl show cf-optimizer -p ActiveState -p Result -p StatusText
 # 运行期间的当前阶段，结束后清理
@@ -109,12 +118,15 @@ cat /run/cf-optimizer/status.json
 sudo cat /run/cf-optimizer/best-ips.txt
 # 查看下次执行时间
 systemctl list-timers cf-optimizer.timer
+systemctl list-timers cf-optimizer-health.timer
 # 检查今天是否为运行日：退出码 0=是，1=否，2=配置错误
 sudo cf-optimizer --schedule-check
 # 停止一轮扫描
 sudo systemctl stop cf-optimizer
 # 关闭定时
 sudo systemctl disable --now cf-optimizer.timer
+# 关闭每 6 小时健康检查
+sudo systemctl disable --now cf-optimizer-health.timer
 ```
 
 `cf-optimizer --force` 可在前台显示过程并绕过日期限制；定时器列表显示的是下次日期检查时间，实际扫描日期由三天周期决定。`--smoke` 优先检查最新优选列表，首次运行回退到少量已知 NRT IP，有一个通过下载验证即结束，不替换正式结果或更新 DNS。并发运行会被拒绝；退出和停止服务会清理临时路由与数据。

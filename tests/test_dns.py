@@ -53,13 +53,13 @@ class FakeCloudflare:
 
 
 class DNSTests(unittest.TestCase):
-    def run_comparison(self, rounds, candidates=None, client=None, pings=None):
+    def run_comparison(self, rounds, candidates=None, client=None, pings=None, failover_only=False):
         client = client or FakeCloudflare()
         measurement = Mock(side_effect=rounds)
         sleeper = Mock()
         health = Mock(side_effect=pings if pings is not None else lambda ips: {ip: True for ip in ips})
         with patch.dict(os.environ, ENV, clear=True):
-            report = dns.compare_and_update(candidates or [NEW], client=client, measure=measurement, sleep=sleeper, ping_measure=health)
+            report = dns.compare_and_update(candidates or [NEW], client=client, measure=measurement, sleep=sleeper, ping_measure=health, failover_only=failover_only)
         return '\n'.join(report), client, measurement, sleeper
 
     def test_disabled_does_not_contact_cloudflare_or_probe(self):
@@ -126,6 +126,17 @@ class DNSTests(unittest.TestCase):
         self.assertEqual(client.current[0]['content'], NEW)
         self.assertEqual(measure.call_count, 2)
         sleep.assert_called_once_with(30)
+
+    def test_health_mode_does_not_apply_latency_optimization_to_healthy_ips(self):
+        report, client, _, _ = self.run_comparison([{OLD: 100, NEW: 80}] * 2, failover_only=True)
+        self.assertIn('保留现有解析', report)
+        self.assertFalse(client.writes)
+
+    def test_health_mode_can_still_fail_over_confirmed_faults(self):
+        report, client, _, _ = self.run_comparison([{OLD: None, NEW: 80}] * 2,
+                                                pings=[{OLD: False, NEW: True}] * 2, failover_only=True)
+        self.assertIn('故障切换', report)
+        self.assertEqual(client.current[0]['content'], NEW)
 
     def test_ping_is_the_requested_failover_trigger_even_when_tcp_replies(self):
         report, client, _, _ = self.run_comparison([{OLD: 60, NEW: 65}] * 2,
