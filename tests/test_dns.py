@@ -1,10 +1,12 @@
 import copy
 import importlib.util
+import io
+import json
 import math
 import os
 from pathlib import Path
-import types
 import unittest
+import urllib.error
 from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -129,6 +131,27 @@ class DNSTests(unittest.TestCase):
         self.assertNotIn('DNS 已更新', report)
         self.assertEqual(len(client.writes), 1)
 
+    def test_readback_with_wrong_address_is_not_reported_as_success(self):
+        client = FakeCloudflare()
+        replace = client.replace
+        def wrong_write(records, ips):
+            replace(records, ips)
+            client.current[0]['content'] = OTHER
+        client.replace = wrong_write
+        report, client, _, _ = self.run_comparison([{OLD: 100, NEW: 80}] * 2, client=client)
+        self.assertIn('更新结果未确认', report)
+        self.assertNotIn('DNS 已更新', report)
+        self.assertEqual(len(client.writes), 1)
+
+    def test_only_one_qualified_replacement_for_two_records_does_not_partially_update(self):
+        old2 = '172.64.229.2'
+        client = FakeCloudflare([record(), record(old2, 2)])
+        rounds = [{OLD: 100, old2: 105, NEW: 80, OTHER: 95}] * 2
+        report, client, _, _ = self.run_comparison(rounds, [NEW, OTHER], client)
+        self.assertIn('保留现有解析', report)
+        self.assertFalse(client.writes)
+        self.assertEqual([r['content'] for r in client.current], [OLD, old2])
+
     def test_unknown_api_error_does_not_expose_credentials(self):
         client = FakeCloudflare()
         client.records = Mock(side_effect=RuntimeError(ENV['CLOUDFLARE_API_TOKEN']))
@@ -155,6 +178,46 @@ class DNSTests(unittest.TestCase):
         with patch.dict(os.environ, {'CF_DNS_API_PROXY_URL': 'http://127.0.0.1:7890'}, clear=True), patch('urllib.request.build_opener') as opener:
             dns.Cloudflare(*dns.configuration(ENV))
         self.assertEqual(opener.call_args.args[0].proxies['https'], 'http://127.0.0.1:7890')
+
+    def test_actual_request_encodes_batch_and_keeps_token_out_of_url_and_body(self):
+        client = dns.Cloudflare(*dns.configuration(ENV))
+        client.opener = Mock()
+        client.opener.open.return_value = io.BytesIO(b'{"success":true,"result":{}}')
+        body = {'patches': [{'id': '1' * 32, 'content': NEW}]}
+        client.request('POST', '/batch', body)
+        request = client.opener.open.call_args.args[0]
+        self.assertEqual(request.get_method(), 'POST')
+        self.assertEqual(json.loads(request.data), body)
+        self.assertTrue(request.full_url.endswith('/dns_records/batch'))
+        self.assertEqual(request.get_header('Authorization'), 'Bearer ' + ENV['CLOUDFLARE_API_TOKEN'])
+        self.assertNotIn(ENV['CLOUDFLARE_API_TOKEN'], request.full_url)
+        self.assertNotIn(ENV['CLOUDFLARE_API_TOKEN'].encode(), request.data)
+        self.assertEqual(client.opener.open.call_count, 1)
+
+    def test_auth_and_transport_errors_are_sanitized_and_not_retried(self):
+        errors = [urllib.error.HTTPError('https://api.cloudflare.com/', 403, ENV['CLOUDFLARE_API_TOKEN'], {}, None),
+                  urllib.error.URLError(ENV['CLOUDFLARE_API_TOKEN'])]
+        for error in errors:
+            with self.subTest(error=type(error).__name__):
+                client = dns.Cloudflare(*dns.configuration(ENV))
+                client.opener = Mock()
+                client.opener.open.side_effect = error
+                with self.assertRaises(dns.DNSProblem) as raised:
+                    client.request('POST', '/batch', {'patches': []})
+                self.assertNotIn(ENV['CLOUDFLARE_API_TOKEN'], str(raised.exception))
+                self.assertEqual(client.opener.open.call_count, 1)
+
+    def test_malformed_api_responses_do_not_count_as_confirmed_success(self):
+        for content in (b'not-json', b'[]', b'{"success":false}', b'{"success":"true"}'):
+            with self.subTest(content=content):
+                client = dns.Cloudflare(*dns.configuration(ENV))
+                client.opener = Mock()
+                client.opener.open.return_value = io.BytesIO(content)
+                with self.assertRaises(dns.DNSProblem):
+                    client.request('POST', '/batch', {'patches': []})
+
+    def test_api_redirects_are_refused(self):
+        self.assertIsNone(dns.NoRedirect().redirect_request(None, None, 302, '', {}, 'https://other.example.com'))
 
     def test_wrong_name_or_proxied_or_paginated_records_are_rejected(self):
         client = dns.Cloudflare(*dns.configuration(ENV))
