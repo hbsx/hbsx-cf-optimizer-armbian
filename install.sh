@@ -1,5 +1,5 @@
 #!/bin/bash
-# Install/update the scan-only Linux edition. Preserve existing credentials.
+# Install/update the Linux edition. Preserve existing credentials.
 set -euo pipefail
 umask 027
 [[ $EUID == 0 ]] || { echo 'Please run with sudo.' >&2; exit 1; }
@@ -14,7 +14,7 @@ machine=$(uname -m)
 cfst_arch=$(python3 "$src/tools/install_platform.py" "$machine")
 cfst_dir="cfst_linux_${cfst_arch}"
 printf 'Detected architecture: %s; cfst platform: %s\n' "$machine" "$cfst_arch"
-for file in cf-optimizer nrt_scan.py run_scan_linux.sh telegram_notify.py telegram_notify.sh env.linux.sh.example cf-optimizer.service cf-optimizer.timer; do
+for file in cf-optimizer nrt_scan.py dns_update.py schedule.py run_scan_linux.sh telegram_notify.py telegram_notify.sh env.linux.sh.example cf-optimizer.service cf-optimizer.timer; do
     test -f "$src/linux/$file" || { echo "Missing source: linux/$file" >&2; exit 1; }
 done
 tmp=$(mktemp -d /run/cf-optimizer-install.XXXXXXXX)
@@ -33,20 +33,29 @@ install -d -o root -g cfoptimizer -m 750 "$dst"
 if [[ -f "$tmp/$cfst_dir/cfst" ]]; then
     install -o root -g root -m 755 "$tmp/$cfst_dir/cfst" "$dst/cfst"
 fi
-for file in nrt_scan.py run_scan_linux.sh telegram_notify.py telegram_notify.sh env.linux.sh.example; do
+for file in nrt_scan.py dns_update.py schedule.py run_scan_linux.sh telegram_notify.py telegram_notify.sh env.linux.sh.example; do
     install -o root -g cfoptimizer -m 640 "$src/linux/$file" "$dst/$file"
 done
 install -o root -g cfoptimizer -m 640 "$src/ip.txt" "$dst/ip.txt"
 if [[ ! -f "$dst/env.sh" ]]; then
     install -o cfoptimizer -g cfoptimizer -m 600 "$src/linux/env.linux.sh.example" "$dst/env.sh"
 fi
+# One-time configuration writes only; no last-run date is saved at runtime.
+if ! grep -q '^CFST_SCHEDULE_ANCHOR=' "$dst/env.sh"; then
+    printf '\nCFST_SCHEDULE_ANCHOR="%s"\n' "$(TZ=Asia/Shanghai date +%F)" >> "$dst/env.sh"
+fi
+for setting in 'CFST_SCHEDULE_DAYS=3' 'CF_DNS_ENABLED=0' 'CF_DNS_NAME=""' 'CLOUDFLARE_ZONE_ID=""' 'CLOUDFLARE_API_TOKEN=""' 'CF_DNS_API_PROXY_URL=""'; do
+    key=${setting%%=*}
+    if ! grep -q "^${key}=" "$dst/env.sh"; then printf '%s\n' "$setting" >> "$dst/env.sh"; fi
+done
 install -o root -g root -m 755 "$src/linux/cf-optimizer" /usr/local/sbin/cf-optimizer
 install -o root -g root -m 644 "$src/linux/cf-optimizer.service" /etc/systemd/system/cf-optimizer.service
 install -o root -g root -m 644 "$src/linux/cf-optimizer.timer" /etc/systemd/system/cf-optimizer.timer
 systemd-analyze verify /etc/systemd/system/cf-optimizer.service /etc/systemd/system/cf-optimizer.timer
 systemctl daemon-reload
 cf-optimizer --check
-systemctl enable --now cf-optimizer.timer
-echo 'Installed. Configure /opt/cf-optimizer/env.sh. Daily schedule: 03:00 Asia/Shanghai.'
-echo 'Manual run: systemctl start --no-block cf-optimizer'
+systemctl enable cf-optimizer.timer
+systemctl restart cf-optimizer.timer
+echo 'Installed. Configure /opt/cf-optimizer/env.sh. Default: every 3 days at 03:00 Asia/Shanghai.'
+echo 'Manual run (bypass cadence): cf-optimizer --force'
 echo 'Runtime IP list (RAM only): /run/cf-optimizer/best-ips.txt'

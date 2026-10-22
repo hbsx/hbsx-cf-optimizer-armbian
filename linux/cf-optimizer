@@ -20,7 +20,15 @@ clean_runtime() {
 }
 if [[ "${1:-}" == cleanup ]]; then clean_runtime; exit 0; fi
 mode="${1:---force}"
-case "$mode" in --check|--smoke|--force|--scheduled) ;; *) echo 'Usage: cf-optimizer [--check|--smoke|--force|--scheduled]' >&2; exit 2;; esac
+case "$mode" in --check|--smoke|--force|--scheduled|--schedule-check) ;; *) echo 'Usage: cf-optimizer [--check|--smoke|--force|--scheduled|--schedule-check]' >&2; exit 2;; esac
+if [[ "$mode" == --scheduled || "$mode" == --schedule-check ]]; then
+    due=0
+    runuser -u cfoptimizer -- env -i PATH="$PATH" PYTHONDONTWRITEBYTECODE=1 TZ=Asia/Shanghai \
+        /bin/bash /opt/cf-optimizer/run_scan_linux.sh --schedule-check || due=$?
+    if [[ "$mode" == --schedule-check ]]; then exit "$due"; fi
+    if [[ "$due" == 1 ]]; then exit 0; fi
+    if [[ "$due" != 0 ]]; then exit "$due"; fi
+fi
 [[ "$(stat -f -c %T /run)" == tmpfs ]] || { echo '/run must be tmpfs.' >&2; exit 1; }
 [[ ! -L /run/cf-optimizer ]] || exit 1
 install -d -m 750 -o cfoptimizer -g cfoptimizer /run/cf-optimizer

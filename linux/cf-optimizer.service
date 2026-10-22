@@ -1,12 +1,12 @@
 [Unit]
-Description=Cloudflare NRT IP selection (Linux, no DNS updates)
+Description=Cloudflare NRT IP selection and conditional DNS update
 Wants=network-online.target
 After=network-online.target mihomo.service
 
 [Service]
 Type=oneshot
 NotifyAccess=all
-ExecStart=/usr/local/sbin/cf-optimizer --force
+ExecStart=/usr/local/sbin/cf-optimizer --scheduled
 ExecStopPost=/usr/local/sbin/cf-optimizer cleanup
 TimeoutStartSec=42min
 TimeoutStopSec=30s

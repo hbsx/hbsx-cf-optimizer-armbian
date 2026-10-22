@@ -1,5 +1,5 @@
 [Unit]
-Description=Daily NRT selection and Telegram report at 03:00 China time
+Description=Check NRT scan cadence at 03:00 China time (default every 3 days)
 
 [Timer]
 OnCalendar=*-*-* 03:00:00 Asia/Shanghai

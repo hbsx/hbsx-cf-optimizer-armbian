@@ -16,6 +16,7 @@ import sys
 import tempfile
 import time
 from urllib.parse import urlsplit
+import dns_update
 
 BASE = Path(__file__).resolve().parent
 OUTPUT = Path(os.environ.get('CFST_OUTPUT_DIR', '/run/cf-optimizer'))
@@ -198,8 +199,9 @@ def publish(work, rows, discovered, total, nets, discovery, attempted):
         '🇯🇵 日本 ({}) 延迟最优 Top {}'.format(COLO, len(top))]
     report += ['📍 {} | 延迟: {} ms | {} MB/s'.format(r[0], r[4], r[5]) for r in top]
     report += ['', '综合推荐：' + ' / '.join(r[0] for r in top[:2]),
-               '测速方式：TCP 延迟；HTTPS 连续限时下载（含连接开销）',
-               '本轮耗时：{:.1f} 分钟'.format((time.monotonic() - STARTED) / 60), '更新时间：' + timestamp]
+               '测速方式：TCP 延迟；HTTPS 连续限时下载（含连接开销）', '']
+    report += dns_update.compare_and_update([r[0] for r in top], PORT, log)
+    report += ['', '本轮耗时：{:.1f} 分钟'.format((time.monotonic() - STARTED) / 60), '更新时间：' + timestamp]
     (work / 'best-ips.txt').write_text(''.join(r[0] + '\n' for r in top), encoding='utf-8')
     (work / 'report.txt').write_text('\n'.join(report) + '\n', encoding='utf-8')
     for name in ('best-ips.txt', 'report.txt'):
@@ -310,7 +312,8 @@ def scan(nets, work):
 def main():
     nets = validate()
     if MODE == '--check':
-        log('Architecture: {}; target: {} ({} ranges, {} addresses); colo: {}; minimum {} MB/s; DNS updates: disabled'.format(os.uname().machine, 'ALL official IPv4' if AUTO else ','.join(CIDRS), len(nets), sum(n.num_addresses for n in nets), COLO, MIN_SPEED))
+        dns_settings = dns_update.configuration()
+        log('Architecture: {}; target: {} ({} ranges, {} addresses); colo: {}; minimum {} MB/s; DNS updates: {}'.format(os.uname().machine, 'ALL official IPv4' if AUTO else ','.join(CIDRS), len(nets), sum(n.num_addresses for n in nets), COLO, MIN_SPEED, dns_settings[2] if dns_settings else 'disabled'))
         subprocess.run(['ip', '-4', 'route', 'get', '104.16.0.1', 'uid', str(os.getuid())], check=True)
         return
     with tempfile.TemporaryDirectory(prefix='.scan.', dir=str(OUTPUT)) as directory:

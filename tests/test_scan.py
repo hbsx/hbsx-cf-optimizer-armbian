@@ -6,12 +6,14 @@ import os
 from pathlib import Path
 import runpy
 import subprocess
+import sys
 import tempfile
 import types
 import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'linux'))
 
 def scanner():
     spec = importlib.util.spec_from_file_location('nrt_scan_under_test', ROOT / 'linux/nrt_scan.py')
@@ -70,6 +72,26 @@ class ScannerTests(unittest.TestCase):
                 self.m.publish(Path(tmp), [row(speed='0')], [row()], 256, [], None, 1)
             self.assertEqual(original.read_text(), '172.64.229.1\n')
             self.assertEqual([p.name for p in Path(tmp).iterdir()], ['best-ips.txt'])
+
+    def test_publish_compares_only_qualified_ips_and_includes_dns_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.m.OUTPUT = Path(tmp)
+            work = Path(tmp) / 'work'
+            work.mkdir()
+            rows = [row(), row('172.64.229.2', speed='1')]
+            with patch.object(self.m.dns_update, 'compare_and_update', return_value=['DNS: test decision']) as compare, patch('builtins.print'):
+                self.m.publish(work, rows, rows, 256, [], None, 2)
+            self.assertEqual(compare.call_args.args[0], ['172.64.229.1'])
+            self.assertIn('DNS: test decision', (Path(tmp) / 'report.txt').read_text(encoding='utf-8'))
+            self.assertEqual((Path(tmp) / 'best-ips.txt').read_text(), '172.64.229.1\n')
+
+    def test_smoke_does_not_compare_or_update_dns(self):
+        self.m.MODE = '--smoke'
+        nets = [ipaddress.IPv4Network('172.64.229.0/24')]
+        with tempfile.TemporaryDirectory() as tmp, patch.object(self.m, 'tcp_probe', return_value=[row()]), patch.object(self.m, 'check_colos', return_value=[row()]), patch.object(self.m, 'throughput', return_value=10), patch.object(self.m, 'log'), patch.object(self.m.dns_update, 'compare_and_update') as compare:
+            self.m.OUTPUT = Path(tmp)
+            self.m.scan(nets, Path(tmp))
+            compare.assert_not_called()
 
     def test_official_list_is_validated_without_writing_cache(self):
         text = (ROOT / 'ip.txt').read_text()
