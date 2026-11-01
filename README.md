@@ -7,7 +7,7 @@
 ## 默认行为
 
 - 默认每 **3 天、北京时间 03:00** 运行一次；关机时错过的任务不补跑。
-- 独立健康检查每天北京时间 **00:00、06:00、12:00、18:00** 运行。旧 IP 正常时每个只 ping 一次，不做 TCP 测速、下载或全网扫描，不生成报告，不推送 TG。
+- 六小时健康检查定时任务**默认关闭**。需要时可配置 `CF_HEALTH_ENABLED=1` 后重新安装启用，在北京时间 00:00、06:00、12:00、18:00 检查；也可手动运行 `cf-optimizer --health`。
 - 覆盖 Cloudflare 官方全部 IPv4 网段，先逐 `/24` 采样发现 NRT，再完整细扫最多 8 个候选 `/24`（2048 IP）。不是逐个扫描全部约 152 万个地址。
 - 地区验证必须返回 `colo=NRT`，下载响应 `CF-RAY` 也必须属于 NRT。
 - **测速直连**：独立系统用户临时查询主路由表，绕过本机 Mihomo TUN；不停止代理、不修改其配置。
@@ -24,7 +24,7 @@
 - 禁用该服务的 swap、崩溃转储和 Python 字节码写入。
 - 临时 CSV、响应头、状态和报告都在 RAM，结束即删除。
 - 推送前把报告读入进程内存并删除文件，重试结束后也不保留本地副本。
-- **只留下 `/run/cf-optimizer/best-ips.txt`**，下次成功运行覆盖，重启后清空。
+- IPv4 只留下 `/run/cf-optimizer/best-ips.txt`；手动 IPv6 只留下独立的 `best-ips-v6.txt`。各自成功运行时覆盖，重启后清空。
 - 两轮比较结果只在进程内存中；三天周期按配置中的固定日期计算，不写运行日期或历史状态文件。
 
 程序、配置和定时任务仅安装/修改时写系统盘。操作系统自身可能记录少量服务启停信息；本项目不会关闭整台设备的系统日志。
@@ -54,7 +54,7 @@ sudo nano /opt/cf-optimizer/env.sh
 
 `CFST_SCHEDULE_DAYS=3` 表示每三天运行；安装器首次写入 `CFST_SCHEDULE_ANCHOR` 为当天北京时间日期。例如起始日为 2026-10-22，则运行日期为 10-22、10-25、10-28、10-31、11-03，均为凌晨 3 点。安装时若已过凌晨 3 点，等待下一个周期。升级不会重置已有起始日。定时器每天凌晨只检查日期，非运行日直接退出，不扫描或推送。重启和跨月不会改变周期。
 
-安装器同时启用 `cf-optimizer-health.timer`，每 6 小时检查 DNS 旧 IP。两个任务共用运行锁，完整优选期间的健康检查会跳过，不会互相清理运行数据。健康检查的临时数据仍只允许写 `/run`，不保存日志或历史结果。
+安装器默认关闭 `cf-optimizer-health.timer`，升级也会遵循 `CF_HEALTH_ENABLED` 配置。显式启用后才每 6 小时检查 DNS 旧 IP。健康检查与完整优选共用运行锁，完整优选期间会跳过，不会互相清理运行数据。临时数据仍只允许写 `/run`，不保存日志或历史结果。
 
 填写自己的 Telegram 配置，勿上传真实配置：
 
@@ -108,6 +108,8 @@ sudo cf-optimizer --check
 sudo systemctl start --no-block cf-optimizer
 # 忽略周期，立即在前台完整优选、比较并推送
 sudo cf-optimizer --force
+# 手动从 IPv6 /48 网段池采样、优选并推送（不修改 DNS）
+sudo cf-optimizer --ipv6
 # 手动执行一次轻量健康检查
 sudo systemctl start --no-block cf-optimizer-health
 # 查看运行状态（systemd 内存状态，不创建日志文件）
@@ -132,6 +134,58 @@ sudo systemctl disable --now cf-optimizer-health.timer
 `cf-optimizer --force` 可在前台显示过程并绕过日期限制；定时器列表显示的是下次日期检查时间，实际扫描日期由三天周期决定。`--smoke` 优先检查最新优选列表，首次运行回退到少量已知 NRT IP，有一个通过下载验证即结束，不替换正式结果或更新 DNS。并发运行会被拒绝；退出和停止服务会清理临时路由与数据。
 
 ## 扫描与测速说明
+
+### 手动 IPv6 优选
+
+`sudo cf-optimizer --ipv6` 从 `ipv6-cidrs.txt` 的候选网段内采样。默认池为：
+
+```text
+2606:4700:ff00::/48
+2606:4700:52::/48
+2606:4700:57::/48
+2606:4700:5a::/48
+```
+
+这些网段在 2026-11-01 的线路测试中命中过 NRT，不代表全段或以后始终是 NRT。每轮每段采样 64 个地址（`CFST_IPV6_SAMPLES_PER_CIDR`，允许 4–256），从已验证后缀和随机地址中产生候选，不遍历整段。按 `/48` 轮换验证和下载，避免一个网段用完所有测速预算；样本未命中不代表整段没有可用地址。
+
+IPv6 候选必须通过直连 TCP、实时 `colo=NRT`、节点端口和下载验证。默认额外测试 2096 端口（`CFST_IPV6_NODE_PORT`）；在设备的 `env.sh` 同时填写 `CFST_IPV6_NODE_HOST` 和 `CFST_IPV6_NODE_PATH`，还会使用该 Host 作为 TLS SNI，验证真实 WebSocket 升级及 NRT 响应。仅适用于 SNI 与 WS Host 相同的节点；不要将业务路径或凭据提交到仓库。未配置这两项时只验证节点 TCP 端口，不代表业务认证或完整代理流量已测试。
+
+这是独立手动入口，不切换三天一次的 IPv4 定时任务，也不修改任何 A / AAAA 记录。通过原有 TG 代理发送报告后删除报告。IPv6 结果单独保留在 `/run/cf-optimizer/best-ips-v6.txt`，不覆盖 IPv4 列表，重启后清空；候选网段文件只在安装或手动修改时写系统盘，运行采样不修改它。
+
+### Telegram 私聊切换 IPv4 / IPv6
+
+#### 接入已有 FlClouds 机器人
+
+已有 FlClouds 时，使用 `integrations/flclouds/` 中的模块及接入补丁。由原机器人统一接收消息，保留其原指令，并追加 `/dns`、`/set`、`/use4`、`/use6`；支持直接发送数字 IP。仅允许配置的管理员私聊，并沿用原程序的认证检查，不处理转发、旧消息或交互向导中的裸 IP。
+
+N1 的 `cf-optimizer-bridge.service` 仅主动连接 FlClouds 的现有 HTTPS 接口，不接收 Telegram 更新，不开放 N1 端口。Cloudflare 凭据留在 N1。两端使用独立的随机共享密钥；安装和接入步骤见 [FlClouds 接入说明](integrations/flclouds/README.md)。启用此模式时，安装器自动停用独立的 `cf-optimizer-bot.service`。
+
+队列、结果和去重状态仅在内存中，超时或断线不会自动重新执行 DNS 修改。N1 工作目录在 `/run`，关闭应用日志、Python 缓存和 swap；仅安装文件与配置会产生一次性系统盘写入。它不新增健康检查或完整扫描定时任务。
+
+#### 使用专用机器人的独立接收器
+
+可选的 `cf-optimizer-bot.service` 复用推送机器人。直接在机器人私聊中发送一个 IP，或发送 `/set IP`：IPv4 切为一条灰云 A 记录，IPv6 切为一条灰云 AAAA 记录，移除**同一个精确域名**的其他 A / AAAA。已有目标类型时保留其中一条的 ID、TTL 和备注；跨类型新建时沿用已有 TTL、备注和标签。存在 CNAME、橙云或异常记录时拒绝操作；TXT 等非地址记录不处理。
+
+**已有接收程序的机器人不可再启动这个独立监听器。** 如果 Token 已用于 OpenClaw、下载工具或其他 Bot 程序，必须把 DNS 处理入口接入原程序的消息分发，或使用专用机器人；两个程序不能分别长轮询同一个 Token。纯发送通知可以共用 Token。发送使用说明不会注册、覆盖或删除已有的命令菜单。
+
+在设备的 `env.sh` 设置以下项目，然后启动服务：
+
+```bash
+CF_TG_CONTROL_ENABLED=1
+CF_TG_ALLOWED_USER_ID="你的个人数字 User ID"
+CF_TG_DIRECT_INTERFACE="eth0"
+# 还需原有 TELEGRAM_*、CLOUDFLARE_*、CF_DNS_NAME，
+# 以及真实节点的 CFST_IPV6_NODE_HOST / PATH / PORT（同时用于 IPv4）。
+sudo systemctl enable --now cf-optimizer-bot.service
+```
+
+只接受匹配 User ID 和正数 Chat ID 的个人私聊新消息；不接受群聊、转发、机器人消息和历史命令。User ID 留空时使用个人 Chat ID。`/dns` 查询当前解析；`/use4`、`/use6` 使用 RAM 中对应优选列表的第一名，再进行实时验证；`/help` 查看说明。RAM 列表重启清空时需要先优选，或直接发送 IP。机器人不提供执行任意系统命令的入口。
+
+每次切换都先确认是 Cloudflare 官方范围内的数字地址，再绑定配置的物理网卡，直连做两轮 NRT 和真实节点 TLS / WebSocket 验证。验证失败不修改 DNS。手动指定不套用原自动优选的“快 10%”规则。与完整扫描共用只读 flock；扫描期间收到更新请求会提示稍后重发。写前核对 DNS 是否发生变化，使用 Cloudflare 批量事务完成切换，再读回核对；写入结果不确定时不会自动重试，请使用 `/dns` 查询。
+
+TG 长轮询和回复均走配置的代理，不需开放入站端口。Webhook 已存在时停止，不会删除已有 Webhook。服务以普通用户运行，无额外 Linux capabilities；不保存命令、日志、游标、报告或历史结果，重启时丢弃旧命令。安装的 tmpfiles 配置仅在 RAM 中创建可读的共享锁，程序不写该锁内容。旧 Linux 内核如不允许普通用户绑定网卡，会拒绝验证并保留 DNS。
+
+此功能保留三天一次的 IPv4 优选；六小时健康定时器默认关闭。手动或显式启用健康检查时，域名只剩 AAAA 会安静跳过；定时 IPv4 优选不会创建 A 记录覆盖 IPv6。切回 A 后恢复原有 IPv4 自动更新规则。DNS 缓存可能延迟客户端看到更新。升级会安装此服务，默认关闭，只有显式启用时才开始监听。
 
 `CFST_TARGET_CIDRS="auto"` 从 Cloudflare 官方拉取所有 IPv4 段；失败时使用安装时附带的官方列表。官方列表当前为 15 段、1,524,736 地址，对应约 5956 个 `/24` 采样点。
 

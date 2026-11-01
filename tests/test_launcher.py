@@ -57,6 +57,14 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue((self.root / 'force_called').exists())
 
+    def test_ipv6_mode_preserves_both_ram_lists_and_cleans_temporary_data(self):
+        for name in ('best-ips.txt', 'best-ips-v6.txt'):
+            (self.runtime / name).write_text('backup\n')
+        (self.runtime / 'scratch.csv').write_text('temporary')
+        result = self.run_launcher(mode='--ipv6')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(sorted(p.name for p in self.runtime.iterdir()), ['best-ips-v6.txt', 'best-ips.txt'])
+
     def test_busy_scan_causes_health_and_post_cleanup_to_skip_safely(self):
         import fcntl
         (self.runtime / 'report.txt').write_text('in-progress report')

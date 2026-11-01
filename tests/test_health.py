@@ -53,6 +53,14 @@ class HealthTests(unittest.TestCase):
         self.client.records.assert_not_called()
         self.probe.assert_not_called()
 
+    def test_ipv6_only_dns_skips_ipv4_health_without_report_or_scan(self):
+        client = health.dns_update.Cloudflare('test-token', '0' * 32, ENV['CF_DNS_NAME'])
+        with patch.object(client, 'request', return_value={'result': [], 'result_info': {'total_pages': 0, 'total_count': 0}}), patch.object(health.dns_update, 'ping_round') as probe:
+            self.assertEqual(health.check(client=client, backups=self.backups, compare=self.compare), (0, None))
+        probe.assert_not_called()
+        self.backups.assert_not_called()
+        self.compare.assert_not_called()
+
     def test_transient_failure_recovers_without_scan_or_report(self):
         self.assertEqual(self.run_check([{OLD: False}, {OLD: True}]), (0, None))
         self.sleep.assert_called_once_with(30)

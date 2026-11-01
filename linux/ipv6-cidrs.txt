@@ -1,0 +1,6 @@
+# Candidate /48 networks observed as NRT from the N1 on 2026-11-01.
+# Every sampled address must pass fresh colo, node-port and throughput checks.
+2606:4700:ff00::/48
+2606:4700:52::/48
+2606:4700:57::/48
+2606:4700:5a::/48

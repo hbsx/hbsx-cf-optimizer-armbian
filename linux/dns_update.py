@@ -68,11 +68,14 @@ class Cloudflare:
             raise DNSProblem('Cloudflare API did not confirm success')
         return data
 
-    def records(self):
+    def records(self, allow_empty=False):
         query = urllib.parse.urlencode({'type': 'A', 'name.exact': self.name, 'per_page': 100})
         data = self.request('GET', '?' + query)
         records = data.get('result')
         info = data.get('result_info', {})
+        if (allow_empty and records == [] and info.get('total_pages', 1) in (0, 1)
+                and info.get('total_count', 0) == 0):
+            return []
         if (not isinstance(records, list) or not 1 <= len(records) <= MAX_RECORDS
                 or info.get('total_pages', 1) != 1 or info.get('total_count', len(records)) != len(records)):
             raise DNSProblem('Expected 1-{} existing A records for the exact hostname'.format(MAX_RECORDS))

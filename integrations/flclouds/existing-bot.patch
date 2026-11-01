@@ -1,0 +1,101 @@
+--- a/backend/src/services/telegramBot.ts
++++ b/backend/src/services/telegramBot.ts
+@@ -1,4 +1,5 @@
+ import { TelegramClient, Api } from 'telegram';
++import { DNS_MENU, handleCfDnsMessage, syncOwnerDnsMenu } from './cfDnsBridge.js';
+ import { StringSession } from 'telegram/sessions/index.js';
+ import { NewMessage, NewMessageEvent } from 'telegram/events/index.js';
+ import { Raw } from 'telegram/events/index.js';
+@@ -610,10 +611,7 @@
+ 
+         // Set Bot Commands
+         try {
+-            await client.invoke(new Api.bots.SetBotCommands({
+-                scope: new Api.BotCommandScopeDefault(),
+-                langCode: 'zh',
+-                commands: [
++            const commands = [
+                     new Api.BotCommand({ command: 'start', description: '开始使用 / 验证身份' }),
+                     new Api.BotCommand({ command: 'setup_2fa', description: '配置双重验证 (2FA)' }),
+                     new Api.BotCommand({ command: 'ytdlp', description: '解析并下载链接到存储源' }),
+@@ -630,8 +628,14 @@
+                     new Api.BotCommand({ command: 'duplicate_mode', description: '设置重复文件处理' }),
+                     new Api.BotCommand({ command: 'cleanup_settings', description: '设置自动清理开关' }),
+                     new Api.BotCommand({ command: 'help', description: '显示预览帮助' }),
+-                ]
++                    ...(process.env.CF_DNS_BRIDGE_ENABLED === '1' ? DNS_MENU.map(item => new Api.BotCommand(item)) : []),
++                ];
++            await client.invoke(new Api.bots.SetBotCommands({
++                scope: new Api.BotCommandScopeDefault(),
++                langCode: 'zh',
++                commands,
+             }));
++            await syncOwnerDnsMenu(commands);
+             console.log('🤖 Bot 命令菜单已更新');
+         } catch (e) {
+             console.error('🤖 更新 Bot 命令菜单失败:', e);
+@@ -706,6 +710,16 @@
+                     return;
+                 }
+ 
++                if (!message.media && await handleCfDnsMessage({
++                    text, senderId, chatId: chatId.toString(),
++                    isPrivate: message.peerId instanceof Api.PeerUser,
++                    authenticated: isAuthenticated(senderId),
++                    forwarded: Boolean(message.fwdFrom || message.viaBotId),
++                    date: message.date,
++                    allowBareIp: !telegramWizardStates.has(senderId) && !userStates.has(senderId) && !passwordInputState.has(senderId),
++                    reply: value => message.reply({ message: value }),
++                })) return;
++
+                 console.log(`🤖 Received text from ${senderId}: ${text}`);
+ 
+                 // Commands
+--- a/backend/src/index.ts
++++ b/backend/src/index.ts
+@@ -9,6 +9,7 @@
+ import storageRouter from './routes/storage.js';
+ import chunkedUploadRouter from './routes/chunkedUpload.js';
+ import authRouter, { requireAuth } from './routes/auth.js';
++import { cfDnsBridgeRouter } from './services/cfDnsBridge.js';
+ import { requireAuthOrSignedUrl } from './middleware/signedUrl.js';
+ import { initTelegramBot } from './services/telegramBot.js';
+ import { initTelegramUserClient, isTelegramUserClientReady } from './services/telegramUserClient.js';
+@@ -82,6 +83,7 @@
+ 
+ // 认证路由（不需要认证）
+ app.use('/api/auth', authRouter);
++app.use('/api/cf-dns-bridge', cfDnsBridgeRouter);
+ 
+ // 静态文件服务（需要认证）
+ app.use('/uploads', requireAuth, express.static(UPLOAD_DIR, {
+--- a/backend/src/utils/telegramMessages.ts
++++ b/backend/src/utils/telegramMessages.ts
+@@ -174,6 +174,12 @@
+         `🧬  /duplicate_mode — 重复文件处理`,
+         `🧹  /cleanup_settings — 自动清理设置`,
+         `❓  /help — 完整帮助`,
++        ...(process.env.CF_DNS_BRIDGE_ENABLED === '1' ? [
++            ``,
++            `🌐  /dns — 查询优选域名 DNS`,
++            `🔄  直接发送 IPv4 / IPv6，或 /set IP — 验证并切换`,
++            `🎯  /use4、/use6 — 使用 N1 最近优选第一名`,
++        ] : []),
+     ].join('\n');
+ }
+ 
+@@ -224,6 +230,14 @@
+         `  /cleanup_settings — 设置自动清理开关`,
+         `  /delete <ID或序号> — 删除指定文件`,
+         `  /help — 显示此帮助`,
++        ...(process.env.CF_DNS_BRIDGE_ENABLED === '1' ? [
++            ``,
++            `**🌐 优选 DNS（仅指定管理员私聊）**`,
++            `  直接发送 IPv4 / IPv6，或 /set IP — 验证并切换`,
++            `  /dns — 查询当前解析`,
++            `  /use4、/use6 — 使用 N1 最近优选的第一名`,
++            `  验证通过后仅保留指定地址类型；失败不修改`,
++        ] : []),
+         ``,
+         LINE,
+         `💡 **提示**：转发文件给 Bot 即可开始上传`,

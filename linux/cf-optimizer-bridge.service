@@ -1,0 +1,33 @@
+[Unit]
+Description=N1 DNS worker for the existing Telegram bot
+Wants=network-online.target
+After=network-online.target mihomo.service systemd-tmpfiles-setup.service
+
+[Service]
+Type=simple
+User=cfoptimizer
+Group=cfoptimizer
+ExecStart=/bin/bash /opt/cf-optimizer/cf_dns_bridge.sh
+Restart=on-failure
+RestartSec=30s
+RuntimeDirectory=cf-optimizer-bridge
+RuntimeDirectoryMode=0700
+StandardOutput=null
+StandardError=null
+LogLevelMax=0
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/run/cf-optimizer-bridge
+NoNewPrivileges=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictSUIDSGID=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+MemoryMax=96M
+MemorySwapMax=0
+LimitCORE=0
+
+[Install]
+WantedBy=multi-user.target

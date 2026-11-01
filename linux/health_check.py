@@ -86,7 +86,10 @@ def check(client=None, probe=None, sleep=None, backups=None, compare=None):
     sleep = sleep or time.sleep
     backups = backups or verified_backups
     compare = compare or dns_update.compare_and_update
-    records = client.records()
+    records = client.records(allow_empty=True) if isinstance(client, dns_update.Cloudflare) else client.records()
+    if not records:
+        status('No A records; IPv4 health check skipped without report or scan')
+        return 0, None
     old_ips = [record['content'] for record in records]
     first = probe(old_ips)
     failed_once = [ip for ip in old_ips if first.get(ip) is False]

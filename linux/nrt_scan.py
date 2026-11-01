@@ -9,8 +9,10 @@ import math
 import os
 from pathlib import Path
 import re
+import secrets
 import signal
 import socket
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -22,6 +24,11 @@ BASE = Path(__file__).resolve().parent
 OUTPUT = Path(os.environ.get('CFST_OUTPUT_DIR', '/run/cf-optimizer'))
 STARTED = time.monotonic()
 MODE = sys.argv[1] if len(sys.argv) > 1 else '--force'
+IPV6 = MODE == '--ipv6'
+IPV6_SAMPLES = int(os.environ.get('CFST_IPV6_SAMPLES_PER_CIDR', 64))
+IPV6_NODE_PORT = int(os.environ.get('CFST_IPV6_NODE_PORT', 2096))
+IPV6_NODE_HOST = os.environ.get('CFST_IPV6_NODE_HOST', '')
+IPV6_NODE_PATH = os.environ.get('CFST_IPV6_NODE_PATH', '')
 COLO = os.environ.get('CFST_COLO', 'NRT')
 AUTO = os.environ.get('CFST_TARGET_CIDRS', 'auto') == 'auto'
 CIDRS = os.environ.get('CFST_TARGET_CIDRS', 'auto').split(',')
@@ -63,7 +70,7 @@ def log(message):
 
 
 def validate():
-    if MODE not in ('--force', '--smoke', '--check', '--scheduled'):
+    if MODE not in ('--force', '--smoke', '--check', '--scheduled', '--ipv6'):
         raise ValueError('Usage: cf-optimizer [--force|--smoke|--check|--scheduled]')
     if not re.fullmatch('[A-Z]{3}', COLO):
         raise ValueError('Use one exact three-letter colo')
@@ -73,14 +80,84 @@ def validate():
         raise ValueError('Invalid selection thresholds')
     if not (1 <= FINE_SUBNETS <= 32 and 20 <= FINE_VERIFY <= 1024 and DOWNLOADS <= ATTEMPTS <= 100):
         raise ValueError('Invalid discovery limits')
-    nets = official_ranges(refresh=MODE != '--check') if AUTO else [ipaddress.IPv4Network(c.strip(), strict=True) for c in CIDRS]
-    if not AUTO and sum(n.num_addresses for n in nets) > 65536:
+    if IPV6:
+        if not (4 <= IPV6_SAMPLES <= 256 and 1 <= IPV6_NODE_PORT <= 65535):
+            raise ValueError('IPv6: use 4-256 samples per /48 and a valid node port')
+        if bool(IPV6_NODE_HOST) != bool(IPV6_NODE_PATH):
+            raise ValueError('IPv6 node Host and WebSocket path must be configured together')
+        if IPV6_NODE_HOST and (not re.fullmatch(r'[a-zA-Z0-9.-]+', IPV6_NODE_HOST)
+                              or not IPV6_NODE_PATH.startswith('/')
+                              or any(c in IPV6_NODE_PATH for c in '\r\n ')):
+            raise ValueError('Invalid IPv6 node Host or WebSocket path')
+        nets = ipv6_ranges()
+    else:
+        nets = official_ranges(refresh=MODE != '--check') if AUTO else [ipaddress.IPv4Network(c.strip(), strict=True) for c in CIDRS]
+    if not IPV6 and not AUTO and sum(n.num_addresses for n in nets) > 65536:
         raise ValueError('Targeted scan limited to 65536 IPs')
     for url in (TRACE, DOWNLOAD_URL):
         p = urlsplit(url)
         if p.scheme != 'https' or not p.hostname or p.port not in (None, PORT):
             raise ValueError('Use an HTTPS endpoint on the configured port')
     return nets
+
+
+def ipv6_ranges():
+    """These /48s are candidates, never a promise that every address is NRT."""
+    official = [ipaddress.IPv6Network(s) for s in ('2400:cb00::/32', '2606:4700::/32',
+                '2803:f800::/32', '2405:b500::/32', '2405:8100::/32', '2a06:98c0::/29', '2c0f:f248::/32')]
+    text = (BASE / 'ipv6-cidrs.txt').read_text(encoding='utf-8')
+    nets = [ipaddress.IPv6Network(line.split('#', 1)[0].strip(), strict=True)
+            for line in text.splitlines() if line.split('#', 1)[0].strip()]
+    if not 1 <= len(nets) <= 8 or len(set(nets)) != len(nets):
+        raise ValueError('IPv6 pool must contain 1-8 distinct /48 networks')
+    if any(n.prefixlen != 48 or not any(n.subnet_of(parent) for parent in official) for n in nets):
+        raise ValueError('IPv6 pool must use Cloudflare /48 networks')
+    return nets
+
+
+def sample_ipv6(nets, count, rng=None):
+    """Bounded sampling; never iterate the enormous IPv6 address space."""
+    if not 4 <= count <= 256 or not 1 <= len(nets) <= 8 or any(n.version != 6 or n.prefixlen != 48 for n in nets):
+        raise ValueError('Invalid IPv6 sampling limits')
+    rng = rng or secrets.SystemRandom()
+    samples = []
+    for net in nets:
+        # Include previously verified suffixes, then vary both host and /64.
+        offsets = {0x68120a51, 0x13081e35}
+        while len(offsets) < count:
+            offsets.add(rng.getrandbits(64 if len(offsets) % 2 == 0 else 80))
+        samples.extend(str(net.network_address + offset) for offset in sorted(offsets))
+    return samples
+
+
+def ipv6_node_works(ip):
+    """Always test the node port; optionally verify its real TLS/WS endpoint."""
+    try:
+        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as raw:
+            raw.settimeout(3)
+            raw.connect((ip, IPV6_NODE_PORT))
+            if not IPV6_NODE_HOST:
+                return True
+            with ssl.create_default_context().wrap_socket(raw, server_hostname=IPV6_NODE_HOST) as connection:
+                request = ('GET ' + IPV6_NODE_PATH + ' HTTP/1.1\r\nHost: ' + IPV6_NODE_HOST
+                           + '\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n'
+                           + 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n')
+                connection.sendall(request.encode())
+                data = b''
+                while b'\r\n\r\n' not in data and len(data) < 16384:
+                    chunk = connection.recv(4096)
+                    if not chunk:
+                        break
+                    data += chunk
+                lines = data.decode('iso-8859-1').split('\r\n')
+                headers = {line.split(':', 1)[0].lower(): line.split(':', 1)[1].strip()
+                           for line in lines[1:] if ':' in line}
+                return (lines[0].split()[1:2] == ['101']
+                        and headers.get('sec-websocket-accept') == 's3pPLMBiTxaQ9kYGzzhZRbK+xOo='
+                        and headers.get('upgrade', '').lower() == 'websocket'
+                        and headers.get('cf-ray', '').endswith('-' + COLO))
+    except (OSError, ValueError):
+        return False
 
 
 def official_ranges(refresh):
@@ -104,8 +181,10 @@ def official_ranges(refresh):
 
 def curl_base(url, ip, timeout):
     host = urlsplit(url).hostname
-    return ['curl', '--noproxy', '*', '-4', '-sS', '--connect-timeout', '2', '--max-time', str(timeout),
-            '--resolve', '{}:{}:{}'.format(host, PORT, ip)]
+    address = ipaddress.ip_address(ip)
+    resolved = '[{}]'.format(address) if address.version == 6 else str(address)
+    return ['curl', '--noproxy', '*', '-6' if address.version == 6 else '-4', '-sS', '--connect-timeout', '2', '--max-time', str(timeout),
+            '--resolve', '{}:{}:{}'.format(host, PORT, resolved)]
 
 
 def identify(row):
@@ -113,7 +192,7 @@ def identify(row):
     p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=7)
     matches = re.findall(r'^colo=([A-Z]{3})\s*$', p.stdout, re.M)
     if p.returncode == 0 and p.stdout.rstrip().endswith('CURL_META:200') and matches == [COLO]:
-        return row
+        return row if not IPV6 or ipv6_node_works(row[0]) else None
     return None
 
 
@@ -125,7 +204,7 @@ def throughput(ip, work):
     successes = 0
     while deadline - time.monotonic() >= 0.2:
         left = deadline - time.monotonic()
-        headers = work / ('headers-' + ip)
+        headers = work / ('headers-' + ipaddress.ip_address(ip).packed.hex())
         cmd = curl_base(DOWNLOAD_URL, ip, max(0.2, left)) + [DOWNLOAD_URL, '-D', str(headers),
                 '-o', '/dev/null', '-w', '%{http_code},%{size_download}']
         p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=left + 3)
@@ -157,7 +236,8 @@ def diverse_candidates(rows):
     the whole verification/download budget."""
     groups = {}
     for row in sorted(rows, key=lambda r: float(r[4])):
-        key = str(ipaddress.IPv4Network(row[0] + '/24', strict=False))
+        address = ipaddress.ip_address(row[0])
+        key = str(ipaddress.ip_network(row[0] + ('/48' if address.version == 6 else '/24'), strict=False))
         groups.setdefault(key, []).append(row)
     return [group[i] for i in range(max(map(len, groups.values()), default=0)) for group in groups.values() if i < len(group)]
 
@@ -186,9 +266,12 @@ def publish(work, rows, discovered, total, nets, discovery, attempted):
     speed_order = sorted(qualified, key=lambda r: (-float(r[5]), float(r[4])))[:POOL_SIZE]
     top = sorted(speed_order, key=lambda r: (float(r[4]), -float(r[5])))[:5]
     timestamp = dt.datetime.now().astimezone().isoformat(timespec='seconds')
-    subnets = sorted({str(ipaddress.IPv4Network(r[0] + '/24', strict=False)) for r in discovered})
+    subnets = sorted({str(ipaddress.ip_network(r[0] + ('/48' if IPV6 else '/24'), strict=False)) for r in discovered})
     report = ['🚀 CF 优选节点报告 ({} 定向优化)'.format(COLO), '']
-    if discovery:
+    if IPV6:
+        report += ['IPv6 网段池：{} 个 /48，每段采样 {} 个，共 {} 个候选。'.format(len(nets), IPV6_SAMPLES, total),
+                   '节点验证：{}。'.format('TLS / WebSocket（端口 {}）'.format(IPV6_NODE_PORT) if IPV6_NODE_HOST else 'TCP 端口 {}'.format(IPV6_NODE_PORT))]
+    elif discovery:
         report += ['全段发现：{} 个官方 IPv4 网段，覆盖 {:,} 个地址，逐 /24 采样 {} 个。'.format(discovery['official_ranges'], discovery['covered_addresses'], discovery['sampled_ips']),
                    '发现 {} 个 NRT /24 网段；优先细扫其中 {} 个（{} 个 IP）。'.format(discovery['nrt_subnets'], len(nets), total)]
     else:
@@ -200,11 +283,13 @@ def publish(work, rows, discovered, total, nets, discovery, attempted):
     report += ['📍 {} | 延迟: {} ms | {} MB/s'.format(r[0], r[4], r[5]) for r in top]
     report += ['', '综合推荐：' + ' / '.join(r[0] for r in top[:2]),
                '测速方式：TCP 延迟；HTTPS 连续限时下载（含连接开销）', '']
-    report += dns_update.compare_and_update([r[0] for r in top], PORT, log)
+    report += (['DNS：手动 IPv6 优选仅报告结果，不修改 A 或 AAAA 记录。'] if IPV6
+               else dns_update.compare_and_update([r[0] for r in top], PORT, log))
     report += ['', '本轮耗时：{:.1f} 分钟'.format((time.monotonic() - STARTED) / 60), '更新时间：' + timestamp]
-    (work / 'best-ips.txt').write_text(''.join(r[0] + '\n' for r in top), encoding='utf-8')
+    best_file = 'best-ips-v6.txt' if IPV6 else 'best-ips.txt'
+    (work / best_file).write_text(''.join(r[0] + '\n' for r in top), encoding='utf-8')
     (work / 'report.txt').write_text('\n'.join(report) + '\n', encoding='utf-8')
-    for name in ('best-ips.txt', 'report.txt'):
+    for name in (best_file, 'report.txt'):
         os.replace(str(work / name), str(OUTPUT / name))
     print('\n'.join(report), flush=True)
     log('Completed: {} selected IPs; report ready'.format(len(speed_order)))
@@ -213,7 +298,13 @@ def publish(work, rows, discovered, total, nets, discovery, attempted):
 def tcp_probe(targets, total, work, name, allip):
     tcp_file = work / (name + '.csv')
     log('{}: TCP probing {} IPs; port={}, threads={}'.format(name, total, PORT, THREADS))
-    cmd = [str(BASE / 'cfst'), '-ip', targets, '-allip', '-n', str(THREADS), '-t', str(PINGS), '-tp', str(PORT),
+    if isinstance(targets, list):
+        target_file = work / (name + '-targets.txt')
+        target_file.write_text('\n'.join(targets) + '\n', encoding='utf-8')
+        target_args = ['-f', str(target_file)]
+    else:
+        target_args = ['-ip', targets]
+    cmd = [str(BASE / 'cfst')] + target_args + ['-allip', '-n', str(THREADS), '-t', str(PINGS), '-tp', str(PORT),
            '-dd', '-p', '0', '-tl', str(int(MAX_LATENCY)), '-tlr', str(MAX_LOSS), '-o', str(tcp_file)]
     if not allip:
         cmd.remove('-allip')
@@ -248,7 +339,7 @@ def check_colos(candidates):
 
 def scan(nets, work):
     discovery = None
-    if AUTO and MODE != '--smoke':
+    if AUTO and not IPV6 and MODE != '--smoke':
         count = sum(max(1, n.num_addresses // 256) for n in nets)
         global_rows = tcp_probe(','.join(map(str, nets)), count, work, 'global-discovery', False)
         hits = check_colos(global_rows)
@@ -270,6 +361,9 @@ def scan(nets, work):
         nets = [ipaddress.IPv4Network(s) for s in chosen]
     targets = ','.join(map(str, nets))
     total = sum(n.num_addresses for n in nets)
+    if IPV6:
+        targets = sample_ipv6(nets, IPV6_SAMPLES)
+        total = len(targets)
     if MODE == '--smoke':
         smoke_ips = smoke_target_ips(nets)
         targets = ','.join(smoke_ips)
@@ -311,6 +405,12 @@ def scan(nets, work):
 
 def main():
     nets = validate()
+    if IPV6:
+        route = subprocess.run(['ip', '-6', 'route', 'get', str(nets[0].network_address + 0x68120a51),
+                                'uid', str(os.getuid())], check=True, capture_output=True, text=True).stdout
+        match = re.search(r'\bdev\s+(\S+)', route)
+        if not match or not (Path('/sys/class/net') / match.group(1) / 'device').exists():
+            raise RuntimeError('IPv6 route is not through a physical network device')
     if MODE == '--check':
         dns_settings = dns_update.configuration()
         log('Architecture: {}; target: {} ({} ranges, {} addresses); colo: {}; minimum {} MB/s; DNS updates: {}'.format(os.uname().machine, 'ALL official IPv4' if AUTO else ','.join(CIDRS), len(nets), sum(n.num_addresses for n in nets), COLO, MIN_SPEED, dns_settings[2] if dns_settings else 'disabled'))
@@ -329,7 +429,7 @@ if __name__ == '__main__':
         main()
     except Exception as exc:
         log('FAILED: {}. Previous published selection retained.'.format(exc))
-        if MODE in ('--force', '--scheduled'):
+        if MODE in ('--force', '--scheduled', '--ipv6'):
             (OUTPUT / 'report.txt').write_text('⚠️ CF 优选未完成（{}）\n\n原因：{}\n未覆盖已有优选 IP。\n更新时间：{}\n'.format(
                 COLO, exc, dt.datetime.now().astimezone().isoformat(timespec='seconds')), encoding='utf-8')
         sys.exit(3)

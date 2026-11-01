@@ -53,6 +53,12 @@ class FakeCloudflare:
 
 
 class DNSTests(unittest.TestCase):
+    def test_empty_records_are_only_allowed_for_explicit_health_read(self):
+        client = dns.Cloudflare('test-token', '0' * 32, ENV['CF_DNS_NAME'])
+        with patch.object(client, 'request', return_value={'result': [], 'result_info': {'total_pages': 0, 'total_count': 0}}):
+            self.assertEqual(client.records(allow_empty=True), [])
+            with self.assertRaises(dns.DNSProblem): client.records()
+
     def run_comparison(self, rounds, candidates=None, client=None, pings=None, failover_only=False):
         client = client or FakeCloudflare()
         measurement = Mock(side_effect=rounds)

@@ -5,12 +5,13 @@ import json
 import os
 from pathlib import Path
 import runpy
+import random
 import subprocess
 import sys
 import tempfile
 import types
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'linux'))
@@ -101,6 +102,79 @@ class ScannerTests(unittest.TestCase):
             self.assertEqual(sum(n.num_addresses for n in nets), 1524736)
             self.assertEqual(sum(max(1, n.num_addresses // 256) for n in nets), 5956)
             self.assertFalse(list(Path(tmp).iterdir()))
+
+    def test_ipv6_pool_sampling_is_bounded_unique_and_covers_each_network(self):
+        nets = self.m.ipv6_ranges()
+        samples = self.m.sample_ipv6(nets, 64, random.Random(42))
+        self.assertEqual(len(samples), 256)
+        self.assertEqual(len(set(samples)), 256)
+        for net in nets:
+            self.assertEqual(sum(ipaddress.ip_address(ip) in net for ip in samples), 64)
+        for count in (0, 3, 257):
+            with self.assertRaises(ValueError): self.m.sample_ipv6(nets, count)
+
+    def test_ipv6_pool_rejects_non_cf_broad_and_duplicate_networks(self):
+        for text in ('2606:4700::/32', '2001:db8::/48', '2606:4700:52::/48\n2606:4700:52::/48'):
+            with self.subTest(text=text), tempfile.TemporaryDirectory() as tmp:
+                self.m.BASE = Path(tmp)
+                (Path(tmp) / 'ipv6-cidrs.txt').write_text(text)
+                with self.assertRaises(ValueError): self.m.ipv6_ranges()
+
+    def test_ipv6_resolve_uses_brackets_and_ipv6_without_changing_ipv4(self):
+        cmd = self.m.curl_base(self.m.TRACE, '2606:4700:52::1', 5)
+        self.assertIn('-6', cmd)
+        self.assertNotIn('-4', cmd)
+        self.assertEqual(cmd[-1], 'www.cloudflare.com:443:[2606:4700:52::1]')
+        self.assertIn('-4', self.m.curl_base(self.m.TRACE, '172.64.229.1', 5))
+
+    def test_ipv6_node_failure_rejects_otherwise_valid_trace(self):
+        self.m.IPV6 = True
+        response = types.SimpleNamespace(stdout='colo=NRT\n\nCURL_META:200', returncode=0)
+        with patch.object(self.m.subprocess, 'run', return_value=response), patch.object(self.m, 'ipv6_node_works', return_value=False):
+            self.assertIsNone(self.m.identify(row('2606:4700:52::1')))
+
+    def test_ipv6_ws_requires_verified_upgrade_and_nrt(self):
+        self.m.IPV6_NODE_HOST = 'node.example.com'
+        self.m.IPV6_NODE_PATH = '/websocket'
+        for status, colo, accept, accepted in [('101', 'NRT', 's3pPLMBiTxaQ9kYGzzhZRbK+xOo=', True),
+                ('200', 'NRT', 's3pPLMBiTxaQ9kYGzzhZRbK+xOo=', False),
+                ('101', 'SIN', 's3pPLMBiTxaQ9kYGzzhZRbK+xOo=', False), ('101', 'NRT', 'wrong', False)]:
+            context = MagicMock()
+            context.wrap_socket.return_value.__enter__.return_value.recv.return_value = (
+                'HTTP/1.1 ' + status + ' status\r\nUpgrade: websocket\r\nCF-Ray: test-' + colo
+                + '\r\nSec-WebSocket-Accept: ' + accept + '\r\n\r\n').encode()
+            with self.subTest(status=status, colo=colo, accept=accept), patch.object(self.m.socket, 'socket'), patch.object(self.m.ssl, 'create_default_context', return_value=context):
+                self.assertEqual(self.m.ipv6_node_works('2606:4700:52::1'), accepted)
+                self.assertEqual(context.wrap_socket.call_args.kwargs['server_hostname'], 'node.example.com')
+
+    def test_ipv6_publication_never_calls_dns_or_replaces_ipv4_list(self):
+        self.m.IPV6 = True
+        with tempfile.TemporaryDirectory() as tmp:
+            self.m.OUTPUT = Path(tmp)
+            (Path(tmp) / 'best-ips.txt').write_text('172.64.229.1\n')
+            work = Path(tmp) / 'work'; work.mkdir()
+            value = row('2606:4700:52::1')
+            with patch.object(self.m.dns_update, 'compare_and_update') as compare, patch('builtins.print'):
+                self.m.publish(work, [value], [value], 64, [ipaddress.ip_network('2606:4700:52::/48')], None, 1)
+            compare.assert_not_called()
+            self.assertEqual((Path(tmp) / 'best-ips.txt').read_text(), '172.64.229.1\n')
+            self.assertEqual((Path(tmp) / 'best-ips-v6.txt').read_text(), '2606:4700:52::1\n')
+
+    def test_ipv6_candidate_budget_rotates_across_48_networks(self):
+        values = [row('2606:4700:52::1', '80'), row('2606:4700:52::2', '81'), row('2606:4700:57::1', '99')]
+        self.assertEqual([r[0] for r in self.m.diverse_candidates(values)[:2]], ['2606:4700:52::1', '2606:4700:57::1'])
+
+    def test_ipv6_scan_samples_hosts_and_skips_ipv4_discovery(self):
+        self.m.IPV6 = True
+        self.m.MODE = '--ipv6'
+        self.m.IPV6_SAMPLES = 4
+        nets = self.m.ipv6_ranges()
+        value = row('2606:4700:52::1')
+        with tempfile.TemporaryDirectory() as tmp, patch.object(self.m, 'tcp_probe', return_value=[value]) as probe, patch.object(self.m, 'check_colos', return_value=[value]), patch.object(self.m, 'throughput', return_value=10), patch.object(self.m, 'publish'), patch.object(self.m, 'log'):
+            self.m.scan(nets, Path(tmp))
+            probe.assert_called_once()
+            self.assertEqual(len(probe.call_args.args[0]), 16)
+            self.assertEqual(probe.call_args.args[1], 16)
 
 class TelegramTests(unittest.TestCase):
     def test_explicit_proxy_and_no_report_retention_on_success_or_failure(self):

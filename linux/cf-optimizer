@@ -5,6 +5,7 @@ export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 [[ $EUID == 0 ]] || { echo 'Run with sudo.' >&2; exit 1; }
 mode="${1:---force}"
 exec 9>/run/lock/cf-optimizer.lock
+chmod 0644 /run/lock/cf-optimizer.lock
 if ! flock -n 9; then
     [[ "$mode" == --health || "$mode" == cleanup-health ]] && exit 0
     echo 'Another scan is running.' >&2; exit 1
@@ -19,11 +20,11 @@ remove_rules() {
 clean_runtime() {
     remove_rules
     if [[ -d /run/cf-optimizer && ! -L /run/cf-optimizer ]]; then
-        find /run/cf-optimizer -mindepth 1 -maxdepth 1 ! -name best-ips.txt -exec rm -rf -- {} +
+        find /run/cf-optimizer -mindepth 1 -maxdepth 1 ! -name best-ips.txt ! -name best-ips-v6.txt -exec rm -rf -- {} +
     fi
 }
 if [[ "$mode" == cleanup || "$mode" == cleanup-health ]]; then clean_runtime; exit 0; fi
-case "$mode" in --check|--smoke|--force|--scheduled|--schedule-check|--health) ;; *) echo 'Usage: cf-optimizer [--check|--smoke|--force|--scheduled|--schedule-check|--health]' >&2; exit 2;; esac
+case "$mode" in --check|--smoke|--force|--scheduled|--schedule-check|--health|--ipv6) ;; *) echo 'Usage: cf-optimizer [--check|--smoke|--force|--scheduled|--schedule-check|--health|--ipv6]' >&2; exit 2;; esac
 if [[ "$mode" == --scheduled || "$mode" == --schedule-check ]]; then
     due=0
     runuser -u cfoptimizer -- env -i PATH="$PATH" PYTHONDONTWRITEBYTECODE=1 TZ=Asia/Shanghai \
@@ -48,7 +49,11 @@ clean_runtime
 for family in -4 -6; do ip "$family" rule add pref "$priority" uidrange "$uid-$uid" lookup main; done
 # Verify the IPv4 route really bypasses a tunnel. Rule collisions or missing main
 # routes must fail before any measurements are published.
-route=$(ip -4 route get 104.16.0.1 uid "$uid")
+if [[ "$mode" == --ipv6 ]]; then
+    route=$(ip -6 route get 2606:4700:ff00::6812:a51 uid "$uid")
+else
+    route=$(ip -4 route get 104.16.0.1 uid "$uid")
+fi
 iface=$(awk '{for(i=1;i<=NF;i++) if($i=="dev") {print $(i+1); exit}}' <<< "$route")
 [[ -n "$iface" && -d "/sys/class/net/$iface/device" ]] || { echo "Route is not through a physical network device: $route" >&2; exit 1; }
 printf 'Scan traffic route: %s\n' "$route"
@@ -69,7 +74,7 @@ if [[ "$mode" == --health && "$status" == 75 ]]; then
     exec 9>&-
     exec /usr/local/sbin/cf-optimizer --force
 fi
-if [[ ( "$mode" == --force || "$mode" == --scheduled || "$mode" == --health ) && -f /run/cf-optimizer/report.txt ]]; then
+if [[ ( "$mode" == --force || "$mode" == --scheduled || "$mode" == --health || "$mode" == --ipv6 ) && -f /run/cf-optimizer/report.txt ]]; then
     # Restore normal Mihomo routing for Telegram after DIRECT measurements.
     remove_rules
     runuser -u cfoptimizer -- env -i PATH="$PATH" HOME=/run/cf-optimizer TMPDIR=/run/cf-optimizer PYTHONDONTWRITEBYTECODE=1 NOTIFY_SOCKET="${NOTIFY_SOCKET:-}" LANG=C.UTF-8 TZ=Asia/Shanghai \
