@@ -15,10 +15,12 @@ async function main() {
     assert.equal(normalizeDnsCommand('2606:4700:ff00::1'), '/set 2606:4700:ff00::1');
     assert.equal(normalizeDnsCommand('/set 172.64.229.194'), '/set 172.64.229.194');
     assert.equal(normalizeDnsCommand('/dns@example_bot'), '/dns');
+    assert.equal(normalizeDnsCommand('/rescue'), '/rescue');
+    assert.equal(normalizeDnsCommand('/rescue 2606:4700::1'), '/rescue 2606:4700::1');
     for (const input of ['/start', '/help', '/tasks', '/ytdlp https://example.com']) {
         assert.equal(normalizeDnsCommand(input), null);
     }
-    for (const input of ['/set localhost', '/set 2606:4700::1%eth0', '/use4 now']) {
+    for (const input of ['/set localhost', '/set 2606:4700::1%eth0', '/use4 now', '/rescue hostname', '/rescue ::1%eth0']) {
         assert.equal(normalizeDnsCommand(input), '/invalid');
     }
     const q = new DnsQueue();
@@ -79,6 +81,31 @@ async function main() {
     assert.match(replies.pop()!, /转发/);
     assert.equal(await handleCfDnsMessage({ ...msg, text: '/help' }), false);
     assert.equal(await handleCfDnsMessage({ ...msg, text: '1.1.1.1', allowBareIp: false }), false);
+    for (const change of [{ senderId: 1 }, { isPrivate: false }, { forwarded: true }, { date: Date.now() / 1000 - 121 }]) {
+        const before = replies.length;
+        await handleCfDnsMessage({ ...msg, text: '/rescue 2606:4700::1', ...change });
+        assert.equal(replies.slice(before).some(text => /正在由甲骨文/.test(text)), false);
+    }
+    // Rescue works while no N1 worker has ever polled this queue.
+    const savedFetch = globalThis.fetch;
+    process.env.CF_DNS_RESCUE_ENABLED = '1'; process.env.CF_DNS_RESCUE_NAME = 'edge.example.com';
+    process.env.CF_DNS_RESCUE_ZONE_ID = 'b'.repeat(32); process.env.CF_DNS_RESCUE_TOKEN = 'unit-secret';
+    try {
+        globalThis.fetch = (async () => new Response(JSON.stringify({ success: true, result: [] }))) as typeof fetch;
+        await handleCfDnsMessage({ ...msg, text: '/rescue' });
+        assert.match(replies.pop()!, /甲骨文直接查询/);
+        let release!: () => void; let started!: () => void;
+        const requestStarted = new Promise<void>(resolve => { started = resolve; });
+        const wait = new Promise<void>(resolve => { release = resolve; });
+        globalThis.fetch = (async () => { started(); await wait; return new Response(JSON.stringify({ success: true, result: [] })); }) as typeof fetch;
+        const running = handleCfDnsMessage({ ...msg, text: '/rescue' });
+        await requestStarted;
+        await handleCfDnsMessage({ ...msg, text: '/set 172.64.229.194' });
+        assert.match(replies.pop()!, /另一条 DNS 指令/);
+        await handleCfDnsMessage({ ...msg, text: '/rescue' });
+        assert.match(replies.pop()!, /另一条 DNS 指令/);
+        release(); await running;
+    } finally { globalThis.fetch = savedFetch; }
 
     const app = express(); app.use(express.json()); app.use('/bridge', cfDnsBridgeRouter);
     const server = app.listen(0, '127.0.0.1');

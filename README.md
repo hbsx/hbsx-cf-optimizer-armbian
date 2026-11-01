@@ -156,9 +156,11 @@ IPv6 候选必须通过直连 TCP、实时 `colo=NRT`、节点端口和下载验
 
 #### 接入已有 FlClouds 机器人
 
-已有 FlClouds 时，使用 `integrations/flclouds/` 中的模块及接入补丁。由原机器人统一接收消息，保留其原指令，并追加 `/dns`、`/set`、`/use4`、`/use6`；支持直接发送数字 IP。仅允许配置的管理员私聊，并沿用原程序的认证检查，不处理转发、旧消息或交互向导中的裸 IP。
+已有 FlClouds 时，使用 `integrations/flclouds/` 中的模块及接入补丁。由原机器人统一接收消息，保留其原指令，并追加 `/dns`、`/set`、`/use4`、`/use6`、`/rescue`；支持直接发送数字 IP。仅允许配置的管理员私聊，并沿用原程序的认证检查，不处理转发、旧消息或交互向导中的裸 IP。
 
-N1 的 `cf-optimizer-bridge.service` 仅主动连接 FlClouds 的现有 HTTPS 接口，不接收 Telegram 更新，不开放 N1 端口。Cloudflare 凭据留在 N1。两端使用独立的随机共享密钥；安装和接入步骤见 [FlClouds 接入说明](integrations/flclouds/README.md)。启用此模式时，安装器自动停用独立的 `cf-optimizer-bot.service`。
+N1 的 `cf-optimizer-bridge.service` 仅主动连接 FlClouds 的现有 HTTPS 接口，不接收 Telegram 更新，不开放 N1 端口。正常入口的 Cloudflare 凭据留在 N1；显式启用备用入口时，还需在 FlClouds 主机私有配置中保存该精确域名的 API 配置。两端使用独立的随机共享密钥；安装和接入步骤见 [FlClouds 接入说明](integrations/flclouds/README.md)。启用此模式时，安装器自动停用独立的 `cf-optimizer-bot.service`。
+
+N1 断网时可用 `/rescue IP` 从 FlClouds 主机直接切换单条 A / AAAA，`/rescue` 直接查询。备用入口不验证家中线路、NRT 或节点握手，默认未配置时不执行。正常的 `/set`、`/use4`、`/use6` 继续由 N1 验证。
 
 队列、结果和去重状态仅在内存中，超时或断线不会自动重新执行 DNS 修改。N1 工作目录在 `/run`，关闭应用日志、Python 缓存和 swap；仅安装文件与配置会产生一次性系统盘写入。它不新增健康检查或完整扫描定时任务。
 

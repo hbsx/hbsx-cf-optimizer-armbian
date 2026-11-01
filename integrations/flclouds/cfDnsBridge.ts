@@ -1,6 +1,7 @@
 import { Router, type Request, type Response } from 'express';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { isIP } from 'node:net';
+import { rescueCommand, RescueProblem } from './cfDnsRescue.js';
 
 type Job = { id: string; command: string; sender_id: number; chat_id: number; created_at: number; expires_at: number };
 type Pending = { job: Job; claimed: boolean; finish: (reply: string) => void; timer: NodeJS.Timeout };
@@ -9,16 +10,18 @@ export const DNS_MENU = [
     { command: 'set', description: '指定 IPv4 或 IPv6 并切换 DNS' },
     { command: 'use4', description: '使用 N1 最近 IPv4 优选第一名' },
     { command: 'use6', description: '使用 N1 最近 IPv6 优选第一名' },
+    { command: 'rescue', description: '甲骨文备用查询/指定 IP 切换（不依赖 N1）' },
 ];
 
 export function normalizeDnsCommand(text: string): string | null {
     const input = text.trim();
     if (isIP(input) && !input.includes('%')) return `/set ${input}`;
-    const match = input.match(/^\/(dns|set|use4|use6)(?:@\w+)?(?:\s+([\s\S]*))?$/i);
+    const match = input.match(/^\/(dns|set|use4|use6|rescue)(?:@\w+)?(?:\s+([\s\S]*))?$/i);
     if (!match) return null;
     const name = match[1].toLowerCase();
     const args = (match[2] || '').trim();
     if (name === 'set') return isIP(args) && !args.includes('%') ? `/set ${args}` : '/invalid';
+    if (name === 'rescue') return !args ? '/rescue' : isIP(args) && !args.includes('%') ? `/rescue ${args}` : '/invalid';
     return args ? '/invalid' : `/${name}`;
 }
 
@@ -94,6 +97,7 @@ export class DnsQueue {
 }
 
 const queue = new DnsQueue();
+let controllerBusy = false;
 function configured() {
     return process.env.CF_DNS_BRIDGE_ENABLED === '1'
         && /^[a-f0-9]{64}$/.test(process.env.CF_DNS_BRIDGE_KEY || '')
@@ -159,14 +163,25 @@ export async function handleCfDnsMessage(message: Message): Promise<boolean> {
         return true;
     }
     if (command === '/invalid') {
-        await message.reply('用法：直接发送一个 IPv4 / IPv6，或 /set IP；/dns 查询，/use4、/use6 使用 N1 优选结果。');
+        await message.reply('用法：直接发送 IP 或 /set IP；/dns 查询，/use4、/use6 使用 N1 优选。N1 故障时用 /rescue IP 直接切换，/rescue 直接查询；备用入口不验证家中线路。');
         return true;
     }
-    if (!queue.online() || queue.busy()) {
-        await message.reply(queue.busy() ? '正在处理另一条 DNS 指令，请稍后重发。' : 'N1 尚未连接，请稍后重发；DNS 未修改。');
+    if (controllerBusy || queue.busy()) {
+        await message.reply('正在处理另一条 DNS 指令，请等结果或超时后重发。');
         return true;
     }
-    await message.reply(command === '/dns' ? '正在查询 N1 的 DNS 配置…' : '正在由 N1 直连验证 IP，完成后回复结果…');
-    await message.reply(await queue.submit(command, message.senderId));
+    controllerBusy = true; // Reserve before the first await, across normal and rescue commands.
+    try {
+        if (command === '/rescue' || command.startsWith('/rescue ')) {
+            await message.reply(command === '/rescue' ? '正在由甲骨文直接查询 DNS…' : '正在由甲骨文直接切换 DNS；此备用入口不验证家中线路…');
+            try { await message.reply(await rescueCommand(command)); }
+            catch (error) { await message.reply(error instanceof RescueProblem ? error.message : '备用入口异常，未自动重试；请 /rescue 查询。'); }
+        } else if (!queue.online()) {
+            await message.reply('N1 尚未连接，DNS 未修改。可用 /rescue 查询，或 /rescue IP 通过甲骨文直接切换；备用入口不验证家中线路。');
+        } else {
+            await message.reply(command === '/dns' ? '正在查询 N1 的 DNS 配置…' : '正在由 N1 直连验证 IP，完成后回复结果…');
+            await message.reply(await queue.submit(command, message.senderId));
+        }
+    } finally { controllerBusy = false; }
     return true;
 }
