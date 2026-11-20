@@ -17,6 +17,13 @@ class LauncherTests(unittest.TestCase):
         self.root = Path(self.directory.name)
         self.bin = self.root / 'bin'
         self.bin.mkdir()
+        # execvp would skip a noexec stub and fall through to real system tools.
+        # Refuse that environment before invoking any launcher at all.
+        self.program('_exec_check', 'exit 0')
+        try:
+            subprocess.run([str(self.bin / '_exec_check')], check=True, timeout=3)
+        except PermissionError:
+            self.skipTest('Launcher stubs require an executable temporary filesystem')
         self.runtime = self.root / 'runtime'
         self.runtime.mkdir()
         self.lock = self.root / 'lock'
@@ -58,12 +65,22 @@ class LauncherTests(unittest.TestCase):
         self.assertTrue((self.root / 'force_called').exists())
 
     def test_ipv6_mode_preserves_both_ram_lists_and_cleans_temporary_data(self):
-        for name in ('best-ips.txt', 'best-ips-v6.txt'):
+        for name in ('best-ips.txt', 'best-ips-v6.txt', 'best-proxy-ips.json'):
             (self.runtime / name).write_text('backup\n')
         (self.runtime / 'scratch.csv').write_text('temporary')
         result = self.run_launcher(mode='--ipv6')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(sorted(p.name for p in self.runtime.iterdir()), ['best-ips-v6.txt', 'best-ips.txt'])
+        self.assertEqual(sorted(p.name for p in self.runtime.iterdir()), ['best-ips-v6.txt', 'best-ips.txt', 'best-proxy-ips.json'])
+
+    def test_proxy_mode_pushes_new_report_and_preserves_official_and_proxy_results(self):
+        self.program('runuser', 'case "$*" in *telegram_notify.sh*) touch ' + str(self.root / 'notify_called') + ';; *"--proxy"*) printf report > ' + str(self.runtime / 'report.txt') + ';; esac\nexit 0')
+        for name in ('best-ips.txt', 'best-ips-v6.txt', 'best-proxy-ips.json'):
+            (self.runtime / name).write_text('keep')
+        result = self.run_launcher(mode='--proxy')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((self.root / 'notify_called').exists())
+        self.assertFalse((self.runtime / 'report.txt').exists())
+        self.assertEqual(len(list(self.runtime.iterdir())), 3)
 
     def test_busy_scan_causes_health_and_post_cleanup_to_skip_safely(self):
         import fcntl

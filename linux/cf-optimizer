@@ -20,11 +20,11 @@ remove_rules() {
 clean_runtime() {
     remove_rules
     if [[ -d /run/cf-optimizer && ! -L /run/cf-optimizer ]]; then
-        find /run/cf-optimizer -mindepth 1 -maxdepth 1 ! -name best-ips.txt ! -name best-ips-v6.txt -exec rm -rf -- {} +
+        find /run/cf-optimizer -mindepth 1 -maxdepth 1 ! -name best-ips.txt ! -name best-ips-v6.txt ! -name best-proxy-ips.json -exec rm -rf -- {} +
     fi
 }
 if [[ "$mode" == cleanup || "$mode" == cleanup-health ]]; then clean_runtime; exit 0; fi
-case "$mode" in --check|--smoke|--force|--scheduled|--schedule-check|--health|--ipv6) ;; *) echo 'Usage: cf-optimizer [--check|--smoke|--force|--scheduled|--schedule-check|--health|--ipv6]' >&2; exit 2;; esac
+case "$mode" in --check|--smoke|--force|--scheduled|--schedule-check|--health|--ipv6|--proxy|--proxy-check) ;; *) echo 'Usage: cf-optimizer [--check|--smoke|--force|--scheduled|--schedule-check|--health|--ipv6|--proxy|--proxy-check]' >&2; exit 2;; esac
 if [[ "$mode" == --scheduled || "$mode" == --schedule-check ]]; then
     due=0
     runuser -u cfoptimizer -- env -i PATH="$PATH" PYTHONDONTWRITEBYTECODE=1 TZ=Asia/Shanghai \
@@ -74,7 +74,7 @@ if [[ "$mode" == --health && "$status" == 75 ]]; then
     exec 9>&-
     exec /usr/local/sbin/cf-optimizer --force
 fi
-if [[ ( "$mode" == --force || "$mode" == --scheduled || "$mode" == --health || "$mode" == --ipv6 ) && -f /run/cf-optimizer/report.txt ]]; then
+if [[ ( "$mode" == --force || "$mode" == --scheduled || "$mode" == --health || "$mode" == --ipv6 || "$mode" == --proxy ) && -f /run/cf-optimizer/report.txt ]]; then
     # Restore normal Mihomo routing for Telegram after DIRECT measurements.
     remove_rules
     runuser -u cfoptimizer -- env -i PATH="$PATH" HOME=/run/cf-optimizer TMPDIR=/run/cf-optimizer PYTHONDONTWRITEBYTECODE=1 NOTIFY_SOCKET="${NOTIFY_SOCKET:-}" LANG=C.UTF-8 TZ=Asia/Shanghai \

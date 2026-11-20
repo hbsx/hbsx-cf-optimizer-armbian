@@ -25,6 +25,7 @@
 - 临时 CSV、响应头、状态和报告都在 RAM，结束即删除。
 - 推送前把报告读入进程内存并删除文件，重试结束后也不保留本地副本。
 - IPv4 只留下 `/run/cf-optimizer/best-ips.txt`；手动 IPv6 只留下独立的 `best-ips-v6.txt`。各自成功运行时覆盖，重启后清空。
+- 手动反代优选独立使用 `/run/cf-optimizer/best-proxy-ips.json`，包含 IP、端口、机房和本轮检查结果；不覆盖官方 IPv4/IPv6 列表，重启后清空。
 - 两轮比较结果只在进程内存中；三天周期按配置中的固定日期计算，不写运行日期或历史状态文件。
 
 程序、配置和定时任务仅安装/修改时写系统盘。操作系统自身可能记录少量服务启停信息；本项目不会关闭整台设备的系统日志。
@@ -134,6 +135,30 @@ sudo systemctl disable --now cf-optimizer-health.timer
 `cf-optimizer --force` 可在前台显示过程并绕过日期限制；定时器列表显示的是下次日期检查时间，实际扫描日期由三天周期决定。`--smoke` 优先检查最新优选列表，首次运行回退到少量已知 NRT IP，有一个通过下载验证即结束，不替换正式结果或更新 DNS。并发运行会被拒绝；退出和停止服务会清理临时路由与数据。
 
 ## 扫描与测速说明
+
+### 手动第三方反代优选（HKG / NRT / SIN）
+
+```bash
+sudo cf-optimizer --proxy-check
+# 前台运行，结束后通过现有 TG 配置推送
+sudo cf-optimizer --proxy
+# 后台运行；不新增定时器
+sudo systemctl start --no-block cf-optimizer-proxy
+systemctl show cf-optimizer-proxy -p ActiveState -p Result -p StatusText
+sudo cat /run/cf-optimizer/best-proxy-ips.json
+```
+
+从 [skfoa/tg-proxy-fetcher 的公开 CSV](https://raw.githubusercontent.com/skfoa/tg-proxy-fetcher/main/data/scan_ips.csv) 获取候选，筛选 HKG、NRT、SIN、TLS 开启、上游失败计数为零的地址，覆盖腾讯、阿里、华为、AWS、Oracle、Azure、Google、IT7、DMIT、Vultr、DigitalOcean、Linode/Akamai、OVH、xTom、Akile、UCloud、Evoxt。上游标签仅用于初筛；地区以本轮验证结果为准。仅请求列表中的具体 IP 和端口，不扫描厂商整段。
+
+同时加载本机 `proxy-candidates.csv`。自带候选是在 2026-11-20 的 N1 测试中可用的入口，不保证以后一直有效。安装器保留已有候选文件，方便维护自己的列表；新安装才复制默认文件。
+
+所有 TCP、TLS、WebSocket 和下载测试都绑定配置中的物理网卡，绕过本机 Mihomo；候选池获取和 TG 推送使用配置中的代理。先做有数量上限的 TCP/公开 CF 检查，再按地区选择候选；下载逐条进行，默认三轮、每轮 4 MiB，所有轮次完整成功、地区一致且不低于 `CF_PROXY_MIN_MBPS=8` 才入选。HTTP 429 会停止本轮，不把旧结果当成新结果。
+
+真实节点验证需要在设备上配置 `CF_PROXY_VERIFY_NODE=1` 以及原有 `CFST_IPV6_NODE_HOST`、`CFST_IPV6_NODE_PATH`（这里也用于 IPv4）。**只会向本机候选 CSV 中明确列出的 IP:端口发送这些私有连接信息**，每轮最多 30 个地址；远程 CSV 不能自动扩充允许范围。默认关闭真实节点验证，报告会明确标记“仅公开 CF 测试”。启用后，未获本机允许的新地址只在“待确认”一栏出现，不冒充已验证节点。往本机候选 CSV 添加一行，代表允许向该地址发送节点域名和 WS 路径；不会发送 UUID、密码或 Cloudflare/TG Token。SNI 与 WS Host 必须相同。握手验证不包含完整代理业务认证。
+
+本模式保留并报告每条地址自己的端口，**不更新 DNS、不新增 Telegram 接收器、不修改机器人菜单，也不改变三天一次的官方 IPv4 定时任务**。第三方反代不能仅通过修改 A 记录切换端口，原有 `/set`、`/use4`、`/use6`、`/rescue` 的官方网段限制保持原样。
+
+候选 CSV 下载内容、探测数据和待推送报告只在 RAM；报告推送后删除，只有最新成功完成的反代结果 JSON 保留在 `/run`，下一次完成时覆盖。没有应用日志、磁盘测速文件或运行历史。
 
 ### 手动 IPv6 优选
 
