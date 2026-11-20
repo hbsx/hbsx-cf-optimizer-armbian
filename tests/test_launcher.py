@@ -93,6 +93,21 @@ class LauncherTests(unittest.TestCase):
         self.assertTrue((self.runtime / 'report.txt').exists())
         self.assertFalse((self.root / 'force_called').exists())
 
+    def test_proxy_schedule_skips_non_due_day_without_clearing_or_notifying(self):
+        (self.runtime / 'report.txt').write_text('existing')
+        self.program('runuser', 'case "$*" in *--proxy-schedule-check*) exit 1;; esac\nexit 97')
+        result = self.run_launcher(mode='--proxy-scheduled')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.runtime / 'report.txt').read_text(), 'existing')
+        self.assertFalse((self.root / 'notify_called').exists())
+
+    def test_proxy_schedule_on_due_day_dispatches_proxy_and_notifies(self):
+        self.program('runuser', 'case "$*" in *--proxy-schedule-check*) exit 0;; *telegram_notify.sh*) touch ' + str(self.root / 'notify_called') + ';; *"--proxy"*) printf report > ' + str(self.runtime / 'report.txt') + ';; *) exit 97;; esac\nexit 0')
+        result = self.run_launcher(mode='--proxy-scheduled')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((self.root / 'notify_called').exists())
+        self.assertFalse((self.runtime / 'report.txt').exists())
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -7,6 +7,7 @@
 ## 默认行为
 
 - 默认每 **3 天、北京时间 03:00** 运行一次；关机时错过的任务不补跑。
+- 同一周期先运行官方 IPv4 优选，再运行 HKG/NRT/SIN 反代优选，各自通过 TG 推送。共用一个定时器并顺序执行，官方扫描失败后仍尝试反代优选。可用 `CF_PROXY_AUTO_ENABLED=0` 单独关闭自动反代优选。
 - 六小时健康检查定时任务**默认关闭**。需要时可配置 `CF_HEALTH_ENABLED=1` 后重新安装启用，在北京时间 00:00、06:00、12:00、18:00 检查；也可手动运行 `cf-optimizer --health`。
 - 覆盖 Cloudflare 官方全部 IPv4 网段，先逐 `/24` 采样发现 NRT，再完整细扫最多 8 个候选 `/24`（2048 IP）。不是逐个扫描全部约 152 万个地址。
 - 地区验证必须返回 `colo=NRT`，下载响应 `CF-RAY` 也必须属于 NRT。
@@ -136,13 +137,15 @@ sudo systemctl disable --now cf-optimizer-health.timer
 
 ## 扫描与测速说明
 
-### 手动第三方反代优选（HKG / NRT / SIN）
+### 第三方反代优选（HKG / NRT / SIN）
 
 ```bash
 sudo cf-optimizer --proxy-check
+# 是否到达自动反代优选日期：0=到期，1=未到期或已关闭，2=配置错误
+sudo cf-optimizer --proxy-schedule-check
 # 前台运行，结束后通过现有 TG 配置推送
 sudo cf-optimizer --proxy
-# 后台运行；不新增定时器
+# 立即后台运行反代优选，忽略周期
 sudo systemctl start --no-block cf-optimizer-proxy
 systemctl show cf-optimizer-proxy -p ActiveState -p Result -p StatusText
 sudo cat /run/cf-optimizer/best-proxy-ips.json
@@ -157,6 +160,8 @@ sudo cat /run/cf-optimizer/best-proxy-ips.json
 真实节点验证需要在设备上配置 `CF_PROXY_VERIFY_NODE=1` 以及原有 `CFST_IPV6_NODE_HOST`、`CFST_IPV6_NODE_PATH`（这里也用于 IPv4）。**只会向本机候选 CSV 中明确列出的 IP:端口发送这些私有连接信息**，每轮最多 30 个地址；远程 CSV 不能自动扩充允许范围。默认关闭真实节点验证，报告会明确标记“仅公开 CF 测试”。启用后，未获本机允许的新地址只在“待确认”一栏出现，不冒充已验证节点。往本机候选 CSV 添加一行，代表允许向该地址发送节点域名和 WS 路径；不会发送 UUID、密码或 Cloudflare/TG Token。SNI 与 WS Host 必须相同。握手验证不包含完整代理业务认证。
 
 本模式保留并报告每条地址自己的端口，**不更新 DNS、不新增 Telegram 接收器、不修改机器人菜单，也不改变三天一次的官方 IPv4 定时任务**。第三方反代不能仅通过修改 A 记录切换端口，原有 `/set`、`/use4`、`/use6`、`/rescue` 的官方网段限制保持原样。
+
+自动反代优选默认启用：`CF_PROXY_AUTO_ENABLED=1`。它与官方优选共用 `CFST_SCHEDULE_DAYS`（默认 3）、`CFST_SCHEDULE_ANCHOR` 和北京时间 03:00 定时器，不另建一个同时抢带宽的定时器。到期日按顺序运行两轮，各自结束后推送报告；非到期日两轮都直接跳过。自动运行状态查看 `cf-optimizer.service`，手动后台运行状态查看 `cf-optimizer-proxy.service`。`CF_PROXY_AUTO_ENABLED=0` 只关闭自动反代优选，手动 `--proxy` 仍可使用。没有新增磁盘运行日期、日志或历史文件；错过的周期不补跑。
 
 候选 CSV 下载内容、探测数据和待推送报告只在 RAM；报告推送后删除，只有最新成功完成的反代结果 JSON 保留在 `/run`，下一次完成时覆盖。没有应用日志、磁盘测速文件或运行历史。
 

@@ -24,14 +24,17 @@ clean_runtime() {
     fi
 }
 if [[ "$mode" == cleanup || "$mode" == cleanup-health ]]; then clean_runtime; exit 0; fi
-case "$mode" in --check|--smoke|--force|--scheduled|--schedule-check|--health|--ipv6|--proxy|--proxy-check) ;; *) echo 'Usage: cf-optimizer [--check|--smoke|--force|--scheduled|--schedule-check|--health|--ipv6|--proxy|--proxy-check]' >&2; exit 2;; esac
-if [[ "$mode" == --scheduled || "$mode" == --schedule-check ]]; then
+case "$mode" in --check|--smoke|--force|--scheduled|--schedule-check|--health|--ipv6|--proxy|--proxy-check|--proxy-scheduled|--proxy-schedule-check) ;; *) echo 'Usage: cf-optimizer [--check|--smoke|--force|--scheduled|--schedule-check|--health|--ipv6|--proxy|--proxy-check|--proxy-scheduled|--proxy-schedule-check]' >&2; exit 2;; esac
+if [[ "$mode" == --scheduled || "$mode" == --schedule-check || "$mode" == --proxy-scheduled || "$mode" == --proxy-schedule-check ]]; then
+    schedule_check=--schedule-check
+    [[ "$mode" != --proxy-scheduled && "$mode" != --proxy-schedule-check ]] || schedule_check=--proxy-schedule-check
     due=0
     runuser -u cfoptimizer -- env -i PATH="$PATH" PYTHONDONTWRITEBYTECODE=1 TZ=Asia/Shanghai \
-        /bin/bash /opt/cf-optimizer/run_scan_linux.sh --schedule-check || due=$?
-    if [[ "$mode" == --schedule-check ]]; then exit "$due"; fi
+        /bin/bash /opt/cf-optimizer/run_scan_linux.sh "$schedule_check" || due=$?
+    if [[ "$mode" == --schedule-check || "$mode" == --proxy-schedule-check ]]; then exit "$due"; fi
     if [[ "$due" == 1 ]]; then exit 0; fi
     if [[ "$due" != 0 ]]; then exit "$due"; fi
+    [[ "$mode" != --proxy-scheduled ]] || mode=--proxy
 fi
 [[ "$(stat -f -c %T /run)" == tmpfs ]] || { echo '/run must be tmpfs.' >&2; exit 1; }
 [[ ! -L /run/cf-optimizer ]] || exit 1

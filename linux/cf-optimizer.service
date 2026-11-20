@@ -1,14 +1,14 @@
 [Unit]
-Description=Cloudflare NRT IP selection and conditional DNS update
+Description=Scheduled official and reverse-proxy CF selection with Telegram reports
 Wants=network-online.target
 After=network-online.target mihomo.service
 
 [Service]
 Type=oneshot
 NotifyAccess=all
-ExecStart=/usr/local/sbin/cf-optimizer --scheduled
+ExecStart=/bin/bash /opt/cf-optimizer/scheduled_scans.sh
 ExecStopPost=/usr/local/sbin/cf-optimizer cleanup
-TimeoutStartSec=42min
+TimeoutStartSec=84min
 TimeoutStopSec=30s
 KillMode=control-group
 Nice=10

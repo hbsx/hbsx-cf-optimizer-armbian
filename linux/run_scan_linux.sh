@@ -9,6 +9,13 @@ set +a
 export LC_ALL=C.UTF-8
 export PYTHONDONTWRITEBYTECODE=1
 if [[ "${1:-}" == --schedule-check ]]; then exec python3 ./schedule.py; fi
+if [[ "${1:-}" == --proxy-schedule-check ]]; then
+    case "${CF_PROXY_AUTO_ENABLED:-0}" in
+        0) exit 1 ;;
+        1) exec python3 ./schedule.py ;;
+        *) echo 'CF_PROXY_AUTO_ENABLED must be 0 or 1' >&2; exit 2 ;;
+    esac
+fi
 if [[ "${1:-}" == --health ]]; then exec python3 ./health_check.py; fi
 if [[ "${1:-}" == --proxy || "${1:-}" == --proxy-check ]]; then exec python3 ./proxy_scan.py "$1"; fi
 exec python3 ./nrt_scan.py "${1:---force}"
