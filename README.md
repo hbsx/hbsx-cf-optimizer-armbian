@@ -151,7 +151,7 @@ systemctl show cf-optimizer-proxy -p ActiveState -p Result -p StatusText
 sudo cat /run/cf-optimizer/best-proxy-ips.json
 ```
 
-从 [skfoa/tg-proxy-fetcher 的公开 CSV](https://raw.githubusercontent.com/skfoa/tg-proxy-fetcher/main/data/scan_ips.csv) 获取候选，筛选 HKG、NRT、SIN、TLS 开启、上游失败计数为零的地址，覆盖腾讯、阿里、华为、AWS、Oracle、Azure、Google、IT7、DMIT、Vultr、DigitalOcean、Linode/Akamai、OVH、xTom、Akile、UCloud、Evoxt。上游标签仅用于初筛；地区以本轮验证结果为准。仅请求列表中的具体 IP 和端口，不扫描厂商整段。
+从 [skfoa/tg-proxy-fetcher 的公开 CSV](https://raw.githubusercontent.com/skfoa/tg-proxy-fetcher/main/data/scan_ips.csv) 获取候选，筛选 HKG、NRT、SIN、TLS 开启、上游失败计数为零的地址。除腾讯、阿里、华为、AWS、Oracle 等常见厂商外，也覆盖 ByteVirt、LucidaCloud、Leaseweb、VMISS、Zenlayer 等；其他具有有效 ASN 和厂商名称的来源也参与公开初筛。排除 CF 官方地址，避免混作第三方反代。每个地区的公开检查同一厂商最多占 3 个名额，保留本机候选的优先级。上游标签仅用于初筛；地区以本轮验证结果为准。仅请求列表中的具体 IP 和端口，不扫描厂商整段。
 
 同时加载本机 `proxy-candidates.csv`。自带候选是在 2026-11-20 的 N1 测试中可用的入口，不保证以后一直有效。安装器保留已有候选文件，方便维护自己的列表；新安装才复制默认文件。
 
@@ -159,7 +159,9 @@ sudo cat /run/cf-optimizer/best-proxy-ips.json
 
 真实节点验证需要在设备上配置 `CF_PROXY_VERIFY_NODE=1` 以及原有 `CFST_IPV6_NODE_HOST`、`CFST_IPV6_NODE_PATH`（这里也用于 IPv4）。**只会向本机候选 CSV 中明确列出的 IP:端口发送这些私有连接信息**，每轮最多 30 个地址；远程 CSV 不能自动扩充允许范围。默认关闭真实节点验证，报告会明确标记“仅公开 CF 测试”。启用后，未获本机允许的新地址只在“待确认”一栏出现，不冒充已验证节点。往本机候选 CSV 添加一行，代表允许向该地址发送节点域名和 WS 路径；不会发送 UUID、密码或 Cloudflare/TG Token。SNI 与 WS Host 必须相同。握手验证不包含完整代理业务认证。
 
-本模式保留并报告每条地址自己的端口，**不更新 DNS、不新增 Telegram 接收器、不修改机器人菜单，也不改变三天一次的官方 IPv4 定时任务**。第三方反代不能仅通过修改 A 记录切换端口，原有 `/set`、`/use4`、`/use6`、`/rescue` 的官方网段限制保持原样。
+本模式保留并报告每条地址自己的端口，不新增 Telegram 接收器，也不改变三天一次的官方 IPv4 定时任务。第三方反代不能仅通过修改 A 记录切换端口，原有 `/set`、`/use4`、`/use6`、`/rescue` 的官方网段限制保持原样。
+
+可选的反代 DNS 自动更新：在私有 `env.sh` 配置独立的 `CF_PROXY_DNS_NAME`、客户端实际端口 `CF_PROXY_DNS_PORT=443`，并设置 `CF_PROXY_DNS_AUTO_ENABLED=1`（仓库默认 0）。每次手动或定时反代优选成功后，只从本轮结果选相同端口、下载测速最快且在本机允许列表内的候选，再做两轮直连公开 CF 与真实节点握手验证，通过后更新这个独立域名。该规则直接选本轮最快候选，不沿用官方 IPv4 更新的 10% 比较条件；同 IP 不重复写入。无合格候选、验证失败或复测期间 DNS 变化时不覆盖，写入结果不确定时不自动重试。DNS 更新结果附在同一份 TG 报告开头，报告随后清理。原 `CF_DNS_NAME` 和健康检查频率不变。
 
 自动反代优选默认启用：`CF_PROXY_AUTO_ENABLED=1`。它与官方优选共用 `CFST_SCHEDULE_DAYS`（默认 3）、`CFST_SCHEDULE_ANCHOR` 和北京时间 03:00 定时器，不另建一个同时抢带宽的定时器。到期日按顺序运行两轮，各自结束后推送报告；非到期日两轮都直接跳过。自动运行状态查看 `cf-optimizer.service`，手动后台运行状态查看 `cf-optimizer-proxy.service`。`CF_PROXY_AUTO_ENABLED=0` 只关闭自动反代优选，手动 `--proxy` 仍可使用。没有新增磁盘运行日期、日志或历史文件；错过的周期不补跑。
 
@@ -205,8 +207,7 @@ N1 worker 每约 45–60 秒把已经测出的 CF4、CF6、FD 第一名及原始
 
 旧 `/use4`、`/usetj`、`/rescue`、`/rescuetj` 隐藏兼容，不再强制选择线路。裸 IP 和 `/set IP` 仍指定 CF 地址；`/settj IPv4` 仍指定已授权 FD 地址，均自动选择线路。按地区、名次的旧 `/usetj` 仅在 N1 在线时支持，不显示在简化菜单中。
 
-
-配置与测试见 [FlClouds 接入说明](integrations/flclouds/README.md)。
+完整配置与测试见 [FlClouds 接入说明](integrations/flclouds/README.md)。
 
 #### 使用专用机器人的独立接收器
 

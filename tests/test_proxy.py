@@ -68,6 +68,27 @@ class ProxyTests(unittest.TestCase):
                     prober.probe(settings.seeds[0], node=True)
                 connect.assert_not_called()
 
+    def test_new_and_other_identified_providers_are_included_but_cf_edges_are_not(self):
+        self.assertEqual(proxy.provider_name('AS400000', 'ByteVirt LLC'), 'ByteVirt')
+        self.assertEqual(proxy.provider_name('AS400001', 'LUCIDACLOUD LIMITED'), 'LucidaCloud')
+        self.assertEqual(proxy.provider_name('AS400002', 'Other Hosting Ltd.'), 'Other Hosting Ltd.')
+        self.assertIsNone(proxy.provider_name('AS0', 'Unknown'))
+        self.assertIsNone(proxy.provider_name('AS13335', 'Cloudflare Inc.'))
+        header = 'ip,port,tls,colo,asn,isp,fail_count\n'
+        body = ('43.153.156.248,443,true,NRT,AS400002,Other Hosting Ltd.,0\n'
+                '104.16.0.1,443,true,HKG,AS400002,Other Hosting Ltd.,0\n')
+        rows = proxy.remote_rows(header + body)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['brand'], 'Other Hosting Ltd.')
+
+    def test_public_shortlist_cannot_be_taken_by_one_provider(self):
+        rows = [proxy.endpoint('39.105.1.' + str(i), 443, 'HKG', 'Alibaba') for i in range(1, 15)]
+        rows += [proxy.endpoint('43.153.1.' + str(i), 443, 'HKG', 'Tencent') for i in range(1, 4)]
+        for index, row in enumerate(rows): row['tcp_ms'] = index + 1
+        selected = proxy.choose(rows, 20, lambda row: row['tcp_ms'], per_brand=3)
+        self.assertEqual(sum(row['brand'] == 'Alibaba' for row in selected), 3)
+        self.assertEqual(sum(row['brand'] == 'Tencent' for row in selected), 3)
+
     def test_downloads_require_every_round_full_same_colo_and_minimum_speed(self):
         settings = types.SimpleNamespace(download_rounds=2, min_mbps=8)
         row = dict(colo='NRT')

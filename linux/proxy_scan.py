@@ -33,7 +33,33 @@ BRANDS = (
     ('DMIT', ('dmit',)), ('Vultr', ('vultr',)), ('DigitalOcean', ('digitalocean',)),
     ('Linode', ('linode', 'akamai')), ('OVH', ('ovh',)), ('xTom', ('xtom',)),
     ('Akile', ('akile',)), ('UCloud', ('ucloud',)), ('Evoxt', ('evoxt',)),
+    ('ByteVirt', ('bytevirt',)), ('LucidaCloud', ('lucidacloud',)),
+    ('Leaseweb', ('leaseweb',)), ('VMISS', ('vmiss',)), ('Zenlayer', ('zenlayer',)),
+    ('Panstar', ('panstar',)), ('ACCK', ('acck',)), ('Zouter', ('zouter',)),
+    ('Cloudie', ('cloudie',)), ('Dromatics', ('dromatics',)),
+    ('ClusterLogic', ('cluster logic',)), ('Hetzner', ('hetzner',)), ('Netcup', ('netcup',)),
 )
+
+# CF's own edges are not third-party relay candidates.
+CF_RANGES = tuple(ipaddress.ip_network(cidr) for cidr in (
+    '173.245.48.0/20', '103.21.244.0/22', '103.22.200.0/22', '103.31.4.0/22',
+    '141.101.64.0/18', '108.162.192.0/18', '190.93.240.0/20', '188.114.96.0/20',
+    '197.234.240.0/22', '198.41.128.0/17', '162.158.0.0/15', '104.16.0.0/13',
+    '104.24.0.0/14', '172.64.0.0/13', '131.0.72.0/22'))
+
+
+def provider_name(asn, isp):
+    label = (asn + ' ' + isp).lower()
+    if 'cloudflare' in label:
+        return None
+    known = next((name for name, aliases in BRANDS if any(alias in label for alias in aliases)), None)
+    if known:
+        return known
+    # Do not silently discard other identified providers in the public source.
+    if not re.search(r'\bAS[1-9][0-9]*\b', asn, re.I) or isp.strip().lower() in ('', 'unknown', 'n/a'):
+        return None
+    name = re.sub(r'[^A-Za-z0-9 ._-]', '', isp).strip()[:40].strip()
+    return name if re.search(r'[A-Za-z]', name) else None
 
 
 class Problem(RuntimeError):
@@ -86,12 +112,13 @@ def remote_rows(text, limit=5000):
             raise Problem('远程候选池行数超出限制。')
         if row.get('tls') != 'true' or row.get('fail_count') != '0' or row.get('colo') not in COLOS:
             continue
-        label = (row.get('asn', '') + ' ' + row.get('isp', '')).lower()
-        brand = next((name for name, aliases in BRANDS if any(alias in label for alias in aliases)), None)
+        brand = provider_name(row.get('asn', ''), row.get('isp', ''))
         if not brand:
             continue
         try:
             item = endpoint(row['ip'], row['port'], row['colo'], brand)
+            if any(ipaddress.IPv4Address(item['ip']) in net for net in CF_RANGES):
+                continue
         except (ValueError, TypeError, KeyError):
             continue
         rows[key(item)] = item
@@ -375,7 +402,7 @@ def scan(settings, prober=None, fetcher=fetch_pool):
     tcp = [result for _, result in parallel(list(rows.values()), prober.tcp, settings.workers,
            lambda n: status(settings, '反代 TCP 初筛 {}/{}'.format(n, len(rows))))]
     candidates = choose(tcp, settings.public_per_colo, lambda row: row['tcp_ms'],
-                        preferred=settings.allowed_nodes, per_brand=settings.public_per_colo)
+                        preferred=settings.allowed_nodes, per_brand=3)
     status(settings, '公开 CF 检查：{} 条'.format(len(candidates)))
     public = []
     for row, result in parallel(candidates, prober.probe, 6):
