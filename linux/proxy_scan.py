@@ -158,12 +158,12 @@ class Settings:
         parsed = urlsplit(self.proxy)
         if parsed.scheme not in ('http', 'https') or not parsed.hostname:
             raise Problem('候选池获取需要配置 HTTP(S) 代理。')
-        self.max_candidates = integer('CF_PROXY_MAX_CANDIDATES', 5000, 9, 10000)
-        self.public_per_colo = integer('CF_PROXY_PUBLIC_PER_COLO', 20, 3, 60)
+        self.max_candidates = integer('CF_PROXY_MAX_CANDIDATES', 10000, 9, 10000)
+        self.public_per_colo = integer('CF_PROXY_PUBLIC_PER_COLO', 40, 3, 60)
         self.max_nodes = integer('CF_PROXY_MAX_NODE_CANDIDATES', 30, 3, 30)
         self.node_rounds = integer('CF_PROXY_NODE_ROUNDS', 5, 2, 10)
         self.download_rounds = integer('CF_PROXY_DOWNLOAD_ROUNDS', 3, 2, 3)
-        self.download_count = integer('CF_PROXY_DOWNLOAD_PER_COLO', 3, 1, 5)
+        self.download_count = integer('CF_PROXY_DOWNLOAD_PER_COLO', 5, 1, 5)
         self.download_bytes = integer('CF_PROXY_DOWNLOAD_BYTES', 4194304, 1048576, 8388608)
         self.download_timeout = integer('CF_PROXY_DOWNLOAD_TIMEOUT', 8, 3, 20)
         self.workers = integer('CF_PROXY_TCP_WORKERS', 24, 1, 32)
@@ -357,6 +357,43 @@ def choose(rows, limit, score, colo_field='colo', per_brand=6, preferred=()):
     return selected
 
 
+PORT_GROUPS = ('443', '8443', 'other')
+
+
+def port_group(row):
+    return str(row['port']) if row['port'] in (443, 8443) else 'other'
+
+
+def choose_ports(rows, limit, score, per_brand=3, preferred=()):
+    """Share each regional budget across 443, 8443 and other TLS ports."""
+    selected = []
+    preferred = set(preferred)
+    for colo in COLOS:
+        groups = {group: [r for r in rows if r['colo'] == colo and port_group(r) == group]
+                  for group in PORT_GROUPS}
+        counts, ports = {}, {}
+        regional = []
+        while len(regional) < limit:
+            added = False
+            for group in PORT_GROUPS:
+                if len(regional) >= limit:
+                    break
+                eligible = [r for r in groups[group] if counts.get((group, r['brand']), 0) < per_brand]
+                if not eligible:
+                    continue
+                row = min(eligible, key=lambda r: (key(r) not in preferred,
+                          ports.get(r['port'], 0) if group == 'other' else 0, score(r)))
+                groups[group].remove(row)
+                regional.append(row)
+                counts[(group, row['brand'])] = counts.get((group, row['brand']), 0) + 1
+                ports[row['port']] = ports.get(row['port'], 0) + 1
+                added = True
+            if not added:
+                break
+        selected.extend(regional)
+    return selected
+
+
 def qualified_downloads(row, samples, settings):
     if len(samples) != settings.download_rounds:
         return False
@@ -372,8 +409,13 @@ def report_text(settings, selected, pending, notes, total, tested):
     for colo in COLOS:
         lines.extend(['', {'HKG': '🇭🇰 香港 HKG', 'NRT': '🇯🇵 东京 NRT', 'SIN': '🇸🇬 新加坡 SIN'}[colo]])
         rows = selected.get(colo, [])
-        for row in rows:
-            lines.append('{}:{}｜{}｜TCP {:.0f}ms｜{:.1f} Mbps'.format(row['ip'], row['port'], row['brand'], row['tcp_ms'], row['mbps']))
+        for group in PORT_GROUPS:
+            grouped = [r for r in rows if port_group(r) == group]
+            if not grouped:
+                continue
+            lines.append('其他端口' if group == 'other' else group + ' 端口')
+            for row in grouped:
+                lines.append('{}:{}｜{}｜TCP {:.0f}ms｜{:.1f} Mbps'.format(row['ip'], row['port'], row['brand'], row['tcp_ms'], row['mbps']))
         if not rows:
             lines.append('本轮没有全部复测达标的候选')
     if pending:
@@ -381,7 +423,7 @@ def report_text(settings, selected, pending, notes, total, tested):
         for row in pending:
             lines.append('{} {}:{} ({})'.format(row['colo'], row['ip'], row['port'], row['brand']))
     lines.extend(['', 'TCP 为到入口的延迟；下载为 CF 短测。',
-                  '客户端端口保持不变；DNS 结果见报告开头。' if settings.control_env.get('CF_PROXY_DNS_AUTO_ENABLED') == '1'
+                  'DNS 仅使用配置端口；其他端口需同步修改客户端端口。' if settings.control_env.get('CF_PROXY_DNS_AUTO_ENABLED') == '1'
                   else '保留地址和端口；未启用反代 DNS 自动更新。'])
     lines.extend(notes)
     return '\n'.join(lines)[:3900]
@@ -401,8 +443,8 @@ def scan(settings, prober=None, fetcher=fetch_pool):
     status(settings, '反代 TCP 初筛：{} 条'.format(len(rows)))
     tcp = [result for _, result in parallel(list(rows.values()), prober.tcp, settings.workers,
            lambda n: status(settings, '反代 TCP 初筛 {}/{}'.format(n, len(rows))))]
-    candidates = choose(tcp, settings.public_per_colo, lambda row: row['tcp_ms'],
-                        preferred=settings.allowed_nodes, per_brand=3)
+    candidates = choose_ports(tcp, settings.public_per_colo, lambda row: row['tcp_ms'],
+                              preferred=settings.allowed_nodes, per_brand=3)
     status(settings, '公开 CF 检查：{} 条'.format(len(candidates)))
     public = []
     for row, result in parallel(candidates, prober.probe, 6):
@@ -413,7 +455,8 @@ def scan(settings, prober=None, fetcher=fetch_pool):
     if settings.verify_node:
         # At most 30 explicitly listed endpoints, round-robin across regions.
         allowed = [row for row in public if key(row) in settings.allowed_nodes]
-        by_colo = {c: sorted((r for r in allowed if r['colo'] == c), key=lambda r: r['ready_ms']) for c in COLOS}
+        ordered = choose_ports(allowed, settings.max_nodes, lambda r: r['ready_ms'], per_brand=settings.max_nodes)
+        by_colo = {c: [r for r in ordered if r['colo'] == c] for c in COLOS}
         to_verify = []
         for index in range(max((len(r) for r in by_colo.values()), default=0)):
             for colo in COLOS:
@@ -432,7 +475,10 @@ def scan(settings, prober=None, fetcher=fetch_pool):
                                        ready_ms=statistics.median(r['ready_ms'] for r in samples)))
     else:
         successful = public
-    targets = choose(successful, settings.download_count, lambda row: row['ready_ms'], per_brand=settings.download_count)
+    targets = []
+    for group in PORT_GROUPS:
+        targets.extend(choose_ports([r for r in successful if port_group(r) == group],
+                        settings.download_count, lambda row: row['ready_ms'], per_brand=settings.download_count))
     downloads = {key(row): [] for row in targets}
     for round_number in range(settings.download_rounds):
         order = targets[round_number:] + targets[:round_number]

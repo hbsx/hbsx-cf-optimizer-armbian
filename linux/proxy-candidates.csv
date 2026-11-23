@@ -26,3 +26,11 @@ ip,port,colo,provider
 114.119.184.226,443,SIN,Huawei
 38.76.181.100,443,HKG,Cogent Communications
 202.79.164.8,443,NRT,CTG Server Limited
+154.44.24.236,10086,HKG,NetLab Global
+206.237.9.245,2053,HKG,Cloudie
+8.216.95.3,39738,NRT,Alibaba
+43.167.160.231,10086,NRT,Tencent
+185.194.54.210,9443,SIN,xTom
+166.1.249.254,43910,SIN,Evoxt
+47.237.0.133,7788,SIN,Alibaba
+156.245.145.27,8443,SIN,Zillion Network Inc.

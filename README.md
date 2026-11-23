@@ -151,7 +151,7 @@ systemctl show cf-optimizer-proxy -p ActiveState -p Result -p StatusText
 sudo cat /run/cf-optimizer/best-proxy-ips.json
 ```
 
-从 [skfoa/tg-proxy-fetcher 的公开 CSV](https://raw.githubusercontent.com/skfoa/tg-proxy-fetcher/main/data/scan_ips.csv) 获取候选，筛选 HKG、NRT、SIN、TLS 开启、上游失败计数为零的地址。除腾讯、阿里、华为、AWS、Oracle 等常见厂商外，也覆盖 ByteVirt、LucidaCloud、Leaseweb、VMISS、Zenlayer 等；其他具有有效 ASN 和厂商名称的来源也参与公开初筛。排除 CF 官方地址，避免混作第三方反代。每个地区的公开检查同一厂商最多占 3 个名额，保留本机候选的优先级。上游标签仅用于初筛；地区以本轮验证结果为准。仅请求列表中的具体 IP 和端口，不扫描厂商整段。
+从 [skfoa/tg-proxy-fetcher 的公开 CSV](https://raw.githubusercontent.com/skfoa/tg-proxy-fetcher/main/data/scan_ips.csv) 获取候选，筛选 HKG、NRT、SIN、TLS 开启、上游失败计数为零的地址。除腾讯、阿里、华为、AWS、Oracle 等常见厂商外，也覆盖 ByteVirt、LucidaCloud、Leaseweb、VMISS、Zenlayer 等；其他具有有效 ASN 和厂商名称的来源也参与公开初筛。排除 CF 官方地址，避免混作第三方反代。默认公开候选上限 10000 条，每地区公开检查 40 条；按 443、8443、其他 TLS 端口轮流分配名额，每组同一厂商最多占 3 个公开检查名额。其他端口组兼顾不同实际端口，保留本机候选优先级。上游标签仅用于初筛；地区以本轮验证结果为准。仅请求列表中的具体 IP 和端口，不扫描厂商整段。
 
 同时加载本机 `proxy-candidates.csv`。自带候选是在 2026-11-20 的 N1 测试中可用的入口，不保证以后一直有效。安装器保留已有候选文件，方便维护自己的列表；新安装才复制默认文件。
 
@@ -164,6 +164,8 @@ sudo cat /run/cf-optimizer/best-proxy-ips.json
 可选的反代 DNS 自动更新：在私有 `env.sh` 配置独立的 `CF_PROXY_DNS_NAME`、客户端实际端口 `CF_PROXY_DNS_PORT=443`，并设置 `CF_PROXY_DNS_AUTO_ENABLED=1`（仓库默认 0）。每次手动或定时反代优选成功后，只从本轮结果选相同端口、下载测速最快且在本机允许列表内的候选，再做两轮直连公开 CF 与真实节点握手验证，通过后更新这个独立域名。该规则直接选本轮最快候选，不沿用官方 IPv4 更新的 10% 比较条件；同 IP 不重复写入。无合格候选、验证失败或复测期间 DNS 变化时不覆盖，写入结果不确定时不自动重试。DNS 更新结果附在同一份 TG 报告开头，报告随后清理。原 `CF_DNS_NAME` 和健康检查频率不变。
 
 自动反代优选默认启用：`CF_PROXY_AUTO_ENABLED=1`。它与官方优选共用 `CFST_SCHEDULE_DAYS`（默认 3）、`CFST_SCHEDULE_ANCHOR` 和北京时间 03:00 定时器，不另建一个同时抢带宽的定时器。到期日按顺序运行两轮，各自结束后推送报告；非到期日两轮都直接跳过。自动运行状态查看 `cf-optimizer.service`，手动后台运行状态查看 `cf-optimizer-proxy.service`。`CF_PROXY_AUTO_ENABLED=0` 只关闭自动反代优选，手动 `--proxy` 仍可使用。没有新增磁盘运行日期、日志或历史文件；错过的周期不补跑。
+
+下载候选按机房和端口组分别保留，`CF_PROXY_DOWNLOAD_PER_COLO=5` 表示每个机房的每个端口组最多复测 5 条；实际节点验证仍受每轮全局 30 条上限约束。443、8443、其他端口的合格结果都会进入 RAM 快照和 TG 报告。自动 DNS 更新、`/usefd` 和甲骨文备用仍只选 `CF_PROXY_DNS_PORT` 对应端口，不能用 DNS 修改客户端端口。
 
 候选 CSV 下载内容、探测数据和待推送报告只在 RAM；报告推送后删除，只有最新成功完成的反代结果 JSON 保留在 `/run`，下一次完成时覆盖。没有应用日志、磁盘测速文件或运行历史。
 

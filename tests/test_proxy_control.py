@@ -58,6 +58,13 @@ class ProxyControlTests(unittest.TestCase):
         self.assertIn('39.105.108.60:443', answer)
         self.assertFalse(c.writes);probe.assert_not_called()
 
+    def test_faster_other_ports_cannot_replace_a_443_dns_candidate(self):
+        other=dict(self.row,ip='8.216.95.3',port=39738,mbps=1000)
+        self.config.allowed_nodes=frozenset([('39.105.108.60',443),('8.216.95.3',39738)])
+        self.write_snapshot(regions={'HKG':[other,self.row]})
+        rows,_=pc.snapshot(self.config,443)
+        self.assertEqual([r['ip'] for r in rows],['39.105.108.60'])
+
     def test_switch_targets_separate_hostname_and_rechecks_twice(self):
         c, probe = Client(), Mock(return_value=20)
         answer = self.call('/usetj HKG 1', c, probe)

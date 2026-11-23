@@ -180,6 +180,32 @@ class ProxyTests(unittest.TestCase):
                 proxy.scan(settings, fake, lambda _: [])
             self.assertEqual(len(seen), 3)
 
+    def test_fast_443_addresses_do_not_exclude_other_port_groups(self):
+        with tempfile.TemporaryDirectory() as directory:
+            settings = self.settings(directory, CF_PROXY_MAX_NODE_CANDIDATES='3', CF_PROXY_REFRESH_POOL='0')
+            settings.seeds = [proxy.endpoint('39.105.1.' + str(i), 443, 'HKG', 'Alibaba') for i in range(1, 8)]
+            settings.seeds += [proxy.endpoint('43.153.1.1', 8443, 'HKG', 'Tencent'),
+                               proxy.endpoint('111.119.223.194', 10008, 'HKG', 'Huawei')]
+            settings.allowed_nodes = frozenset(proxy.key(r) for r in settings.seeds)
+            seen = set()
+            def probe(row, node=False, download=False):
+                if node: seen.add(row['port'])
+                return dict(ok=True, colo=row['colo'], tcp_ms=10 if row['port']==443 else 50,
+                            ready_ms=10 if row['port']==443 else 80, mbps=50)
+            fake=types.SimpleNamespace(tcp=lambda row:dict(row,tcp_ms=10 if row['port']==443 else 50),probe=probe)
+            with patch('builtins.print'):payload=proxy.scan(settings,fake)
+            self.assertEqual(seen,{443,8443,10008})
+            self.assertEqual({r['port'] for r in payload['regions']['HKG']},{443,8443,10008})
+            report=(Path(directory)/'report.txt').read_text(encoding='utf-8')
+            self.assertIn('443 端口',report);self.assertIn('8443 端口',report);self.assertIn('其他端口',report)
+
+    def test_other_ports_share_slots_across_distinct_ports(self):
+        rows=[proxy.endpoint('39.105.1.'+str(i),2053,'HKG','Alibaba') for i in range(1,8)]
+        rows += [proxy.endpoint('43.153.1.1',10086,'HKG','Tencent'),proxy.endpoint('111.119.223.194',10008,'HKG','Huawei')]
+        for i,row in enumerate(rows):row['ready_ms']=i+1
+        selected=proxy.choose_ports(rows,3,lambda row:row['ready_ms'],per_brand=3)
+        self.assertEqual({r['port'] for r in selected},{2053,10086,10008})
+
 
 if __name__ == '__main__':
     unittest.main()
