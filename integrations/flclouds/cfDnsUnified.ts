@@ -59,7 +59,7 @@ export async function oracleDnsCommand(command: string, cache: CandidateCache): 
         const replies = await Promise.all(queries.map(async kind => {
             try {
                 const client = kind === 'cf' ? new CloudflareRescue() : proxyRescueConfiguration().client;
-                return `${kind === 'cf' ? 'CF' : 'FD（反代）'} · ${display(client.name, await client.records())}`;
+                return `${kind === 'cf' ? 'CF' : 'FD'} · ${display(client.name, await client.records())}`;
             } catch (error) {
                 return `${kind.toUpperCase()}：${error instanceof RescueProblem ? error.message : '查询失败'}`;
             }

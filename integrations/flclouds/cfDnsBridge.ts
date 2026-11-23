@@ -7,7 +7,7 @@ import { CandidateCache, oracleDnsCommand, runPreferred, type N1Result } from '.
 type Job = { id: string; command: string; sender_id: number; chat_id: number; created_at: number; expires_at: number };
 type Pending = { job: Job; claimed: boolean; finish: (reply: N1Result) => void; timer: NodeJS.Timeout };
 export const DNS_MENU = [
-    { command: 'dns', description: '查看 CF 和 FD（反代）当前 IP' },
+    { command: 'dns', description: '查看 CF 和 FD当前 IP' },
     { command: 'usecf', description: '使用 N1 的 CF IPv4 优选第一名' },
     { command: 'usefd', description: '使用 N1 的反代优选第一名（443）' },
     { command: 'use6', description: '使用 N1 的 CF IPv6 优选第一名' },

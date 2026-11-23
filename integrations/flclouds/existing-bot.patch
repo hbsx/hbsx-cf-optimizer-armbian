@@ -77,7 +77,7 @@
          `❓  /help — 完整帮助`,
 +        ...(process.env.CF_DNS_BRIDGE_ENABLED === '1' ? [
 +            ``,
-+            `🌐  /dns — 查看 CF 和 FD（反代）当前 IP`,
++            `🌐  /dns — 查看 CF 和 FD当前 IP`,
 +            `🎯  /usecf — 使用 CF IPv4 优选第一名`,
 +            `🎯  /usefd — 使用反代优选第一名（443）`,
 +            `🎯  /use6 — 使用 CF IPv6 优选第一名`,
@@ -93,7 +93,7 @@
 +        ...(process.env.CF_DNS_BRIDGE_ENABLED === '1' ? [
 +            ``,
 +            `**🌐 优选 DNS（仅指定管理员私聊）**`,
-+            `  /dns — 查看 CF 和 FD（反代）当前 IP`,
++            `  /dns — 查看 CF 和 FD当前 IP`,
 +            `  /usecf — 使用 CF IPv4 优选第一名`,
 +            `  /usefd — 使用反代优选第一名（443）`,
 +            `  /use6 — 使用 CF IPv6 优选第一名`,

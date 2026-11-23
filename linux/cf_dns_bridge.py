@@ -130,7 +130,7 @@ def execute_job(job, settings):
             dns, port, _ = proxy_control.configuration(settings)
             fd = JobDNS(*dns)
             rows = fd.records()
-            lines.append('FD（反代）· ' + fd.name + '\n' + ('\n'.join(r['type'] + ' ' + r['content'] for r in rows) or '暂无地址记录。') + '\n端口：' + str(port))
+            lines.append('FD· ' + fd.name + '\n' + ('\n'.join(r['type'] + ' ' + r['content'] for r in rows) or '暂无地址记录。') + '\n端口：' + str(port))
             reply = '\n\n'.join(lines)
         elif command == '/usefd' or command.startswith(('/usetj', '/settj')):
             dns, _, _ = proxy_control.configuration(settings)

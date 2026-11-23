@@ -69,7 +69,7 @@ async function main() {
                 ttl: 60, proxied: false }] }));
         }) as typeof fetch;
         const query = await oracleDnsCommand('/dns', cache);
-        assert.match(query, /CF · bj.example.com/); assert.match(query, /FD（反代） · tj.example.com/);
+        assert.match(query, /CF · bj.example.com/); assert.match(query, /FD · tj.example.com/);
         assert.equal(writes, 0);
         const result = await oracleDnsCommand('/usecf', cache);
         assert.equal(writes, 1); assert.equal(current, snapshot.cf4.ip);

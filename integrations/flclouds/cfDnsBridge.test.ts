@@ -125,7 +125,7 @@ async function main() {
         process.env.CF_PROXY_RESCUE_ENABLED = '1';process.env.CF_PROXY_RESCUE_NAME = 'tj.example.com';
         process.env.CF_PROXY_RESCUE_IPS = '39.105.108.60';
         await handleCfDnsMessage({ ...msg, text: '/rescuetj' });
-        assert.match(replies.pop()!, /FD（反代） · tj.example.com/);
+        assert.match(replies.pop()!, /FD · tj.example.com/);
         let release!: () => void; let started!: () => void;
         const requestStarted = new Promise<void>(resolve => { started = resolve; });
         const wait = new Promise<void>(resolve => { release = resolve; });
