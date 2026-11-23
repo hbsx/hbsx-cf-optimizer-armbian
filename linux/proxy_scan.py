@@ -103,6 +103,7 @@ def remote_rows(text, limit=5000):
 class Settings:
     def __init__(self, env=None, base=BASE):
         env = os.environ if env is None else env
+        self.control_env = dict(env)
         def integer(name, default, low, high):
             try:
                 value = int(env.get(name, default))
@@ -339,7 +340,8 @@ def qualified_downloads(row, samples, settings):
 def report_text(settings, selected, pending, notes, total, tested):
     now = dt.datetime.now().astimezone().strftime('%Y-%m-%d %H:%M:%S %Z')
     lines = ['🚀 CF 反代优选报告', now, '直连测速｜候选 {}｜公开检查 {}'.format(total, tested),
-             '节点验证：' + ('仅本机允许列表' if settings.verify_node else '未启用；以下仅公开 CF 测试')]
+             '节点验证：' + ('仅本机允许列表，{} 轮'.format(settings.node_rounds) if settings.verify_node else '未启用；以下仅公开 CF 测试'),
+             '下载测速：{} 轮，速度取中位数。'.format(settings.download_rounds)]
     for colo in COLOS:
         lines.extend(['', {'HKG': '🇭🇰 香港 HKG', 'NRT': '🇯🇵 东京 NRT', 'SIN': '🇸🇬 新加坡 SIN'}[colo]])
         rows = selected.get(colo, [])
@@ -351,7 +353,9 @@ def report_text(settings, selected, pending, notes, total, tested):
         lines.extend(['', '🆕 公开检查通过，待本机允许后才能验证节点：'])
         for row in pending:
             lines.append('{} {}:{} ({})'.format(row['colo'], row['ip'], row['port'], row['brand']))
-    lines.extend(['', 'TCP 为到入口的延迟；下载为 CF 短测。', '保留地址和端口；本模式不修改 DNS。'])
+    lines.extend(['', 'TCP 为到入口的延迟；下载为 CF 短测。',
+                  '客户端端口保持不变；DNS 结果见报告开头。' if settings.control_env.get('CF_PROXY_DNS_AUTO_ENABLED') == '1'
+                  else '保留地址和端口；未启用反代 DNS 自动更新。'])
     lines.extend(notes)
     return '\n'.join(lines)[:3900]
 
@@ -422,6 +426,10 @@ def scan(settings, prober=None, fetcher=fetch_pool):
     payload = dict(generated_at=dt.datetime.now().astimezone().isoformat(timespec='seconds'),
                    node_verified=settings.verify_node, regions=selected, unverified=pending)
     atomic_write(settings.output / 'best-proxy-ips.json', json.dumps(payload, ensure_ascii=False))
+    if settings.control_env.get('CF_PROXY_DNS_AUTO_ENABLED', '0') != '0':
+        import proxy_control
+        update = proxy_control.auto_after_scan(settings, payload)
+        report = report.replace('\n', '\n\n' + update + '\n', 1)[:3900]
     atomic_write(settings.output / 'report.txt', report)
     status(settings, '反代优选完成；等待代理 TG 推送')
     print(report, flush=True)

@@ -129,6 +129,21 @@ class ProxyTests(unittest.TestCase):
             self.assertEqual(snapshot.read_text(), 'old snapshot')
             self.assertFalse((Path(directory) / 'report.txt').exists())
 
+    def test_success_calls_auto_after_fresh_snapshot_and_reports_dns_result(self):
+        import proxy_control
+        with tempfile.TemporaryDirectory() as directory:
+            settings=self.settings(directory,CF_PROXY_REFRESH_POOL='0',CF_PROXY_DNS_AUTO_ENABLED='1')
+            fake=types.SimpleNamespace(tcp=lambda row:dict(row,tcp_ms=30),
+                probe=lambda row,**_:dict(ok=True,colo=row['colo'],tcp_ms=30,ready_ms=100,mbps=50))
+            def update(cfg,payload):
+                self.assertEqual(json.loads((Path(directory)/'best-proxy-ips.json').read_text()),payload)
+                return 'DNS_UPDATE_RESULT'
+            with patch.object(proxy_control,'auto_after_scan',side_effect=update) as auto,patch('builtins.print'):
+                proxy.scan(settings,fake)
+            auto.assert_called_once()
+            self.assertIn('DNS_UPDATE_RESULT',(Path(directory)/'report.txt').read_text(encoding='utf-8'))
+            self.assertNotIn('本模式不修改 DNS',(Path(directory)/'report.txt').read_text(encoding='utf-8'))
+
     def test_private_node_budget_is_global_across_regions(self):
         with tempfile.TemporaryDirectory() as directory:
             settings = self.settings(directory, CF_PROXY_MAX_NODE_CANDIDATES='3')

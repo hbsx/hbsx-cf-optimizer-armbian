@@ -64,6 +64,7 @@ class Settings:
         values = dict(env, CF_DNS_ENABLED='1')
         self.dns = dns_update.configuration(values)
         self.runtime = Path(env.get('CFST_OUTPUT_DIR', '/run/cf-optimizer'))
+        self.proxy_control_env = dict(env)
 
 
 class Telegram:
@@ -216,8 +217,8 @@ def update_lock():
             fcntl.flock(lock, fcntl.LOCK_UN)
 
 
-def switch(value, settings, client, probe=None, sleep=None, lock=None):
-    address = candidate(value)
+def switch(value, settings, client, probe=None, sleep=None, lock=None, validator=None, observe_before=None):
+    address = (validator or candidate)(value)
     kind = 'A' if address.version == 4 else 'AAAA'
     value = str(address)
     probe, sleep, lock = probe or verify, sleep or time.sleep, lock or update_lock
@@ -225,6 +226,8 @@ def switch(value, settings, client, probe=None, sleep=None, lock=None):
     try:
         with lock():
             before = client.records()
+            if observe_before:
+                observe_before(before)
             delay = probe(address, settings)
             sleep(2)
             delay = (delay + probe(address, settings)) / 2
@@ -284,6 +287,9 @@ def handle(text, settings, client, username=''):
             return HELP
     if command in ('/start', '/help'):
         return HELP
+    if command in ('/tj', '/usetj', '/settj'):
+        import proxy_control
+        return proxy_control.handle(' '.join([command] + words[1:]), settings)
     if command == '/dns' and len(words) == 1:
         rows = client.records()
         return client.name + '\n' + ('\n'.join(row['type'] + ' ' + row['content'] for row in rows) or '暂无 A / AAAA 记录。')

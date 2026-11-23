@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Outbound-only worker for an existing bot. No Telegram update consumer."""
 import collections
+import datetime as dt
 import ipaddress
 import json
 import os
@@ -13,6 +14,7 @@ import urllib.request
 
 import dns_update
 import telegram_control as control
+import proxy_control
 
 
 class Bridge:
@@ -57,8 +59,14 @@ def accepted_job(job, settings, seen, now=None):
             or not now < job['expires_at'] <= job['created_at'] + 120):
         return False
     command = job.get('command')
-    if command in ('/dns', '/use4', '/use6'):
+    if command in ('/dns', '/usecf', '/usefd', '/use4', '/use6'):
         return True
+    if isinstance(command, str) and len(command) <= 64:
+        try:
+            if proxy_control.parse(command) is not None:
+                return True
+        except control.Problem:
+            return False
     if isinstance(command, str) and command.startswith('/set ') and len(command) <= 64:
         try:
             if '%' in command[5:]:
@@ -70,26 +78,95 @@ def accepted_job(job, settings, seen, now=None):
     return False
 
 
+def snapshot_payload(settings, now=None):
+    """Publish only already-measured winners; never probe or write result files."""
+    now = time.time() if now is None else now
+    result = dict(cf4=None, cf6=None, fd=None)
+    for key, name, family in [('cf4', 'best-ips.txt', 4), ('cf6', 'best-ips-v6.txt', 6)]:
+        try:
+            path = settings.runtime / name
+            stamp = path.stat().st_mtime
+            if not -300 <= now - stamp <= 96 * 3600:
+                continue
+            with path.open(encoding='utf-8') as stream:
+                value = stream.readline(128).strip()
+            address = control.candidate(value)
+            if address.version != family:
+                continue
+            result[key] = dict(ip=str(address), generated_at=dt.datetime.fromtimestamp(stamp, dt.timezone.utc).isoformat())
+        except (OSError, ValueError, control.Problem):
+            pass
+    try:
+        _, port, config = proxy_control.configuration(settings)
+        rows, stamp = proxy_control.snapshot(config, port, dt.datetime.fromtimestamp(now, dt.timezone.utc))
+        if rows:
+            result['fd'] = dict(ip=rows[0]['ip'], port=port, generated_at=stamp)
+    except (OSError, ValueError, control.Problem, dns_update.DNSProblem):
+        pass
+    return result
+
+
+def execute_job(job, settings):
+    """Report whether fallback is safe; never replay an uncertain DNS write."""
+    attempted = False
+
+    class JobDNS(control.ControlDNS):
+        def request(self, method, suffix, body=None):
+            nonlocal attempted
+            if method != 'GET':
+                if time.time() >= job['expires_at']:
+                    raise control.Problem('指令已过期，未发送 DNS 更新。')
+                attempted = True
+            return super().request(method, suffix, body)
+
+    try:
+        command = job['command']
+        client = JobDNS(*settings.dns)
+        if command in ('/dns', '/tj'):
+            lines = []
+            if command == '/dns':
+                rows = client.records()
+                lines.append('CF · ' + client.name + '\n' + ('\n'.join(r['type'] + ' ' + r['content'] for r in rows) or '暂无地址记录。'))
+            dns, port, _ = proxy_control.configuration(settings)
+            fd = JobDNS(*dns)
+            rows = fd.records()
+            lines.append('FD（反代）· ' + fd.name + '\n' + ('\n'.join(r['type'] + ' ' + r['content'] for r in rows) or '暂无地址记录。') + '\n端口：' + str(port))
+            reply = '\n\n'.join(lines)
+        elif command == '/usefd' or command.startswith(('/usetj', '/settj')):
+            dns, _, _ = proxy_control.configuration(settings)
+            reply = proxy_control.handle('/usetj' if command == '/usefd' else command, settings, client=JobDNS(*dns))
+        else:
+            reply = control.handle('/use4' if command == '/usecf' else command, settings, client)
+        return reply + '\n线路：N1。', 'uncertain' if attempted and reply.startswith('⚠️') else 'ok'
+    except dns_update.DNSProblem as error:
+        return str(error), 'uncertain' if attempted else 'unavailable'
+    except control.Problem as error:
+        return str(error), 'uncertain' if attempted else 'failed'
+    except Exception:
+        return '请求执行异常，请 /dns 查询当前记录。', 'uncertain' if attempted else 'failed'
+
+
 def run(bridge):
-    client = control.ControlDNS(*bridge.settings.dns)
     seen = collections.deque(maxlen=128)
+    last_snapshot = 0
     while True:
         try:
+            if time.monotonic() - last_snapshot >= 45:
+                try:
+                    bridge.request('/snapshot', snapshot_payload(bridge.settings))
+                except control.Problem:
+                    pass
+                last_snapshot = time.monotonic()
             job = bridge.request('/next')
             if job is None:
                 continue
             if not accepted_job(job, bridge.settings, seen):
                 continue
             seen.append(job['id'])  # Mark before any possible DNS side effect.
-            try:
-                reply = control.handle(job['command'], bridge.settings, client)
-            except (control.Problem, dns_update.DNSProblem) as error:
-                reply = str(error)
-            except Exception:
-                reply = '请求执行异常，未自动重试；请 /dns 查询。'
+            reply, state = execute_job(job, bridge.settings)
             for attempt in range(3):
                 try:
-                    bridge.request('/result', {'id': job['id'], 'reply': reply[:4000]})
+                    bridge.request('/result', {'id': job['id'], 'reply': reply[:4000], 'state': state})
                     break
                 except control.Problem:
                     if attempt < 2:

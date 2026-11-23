@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import express from 'express';
-import { DnsQueue, normalizeDnsCommand, handleCfDnsMessage, cfDnsBridgeRouter, syncOwnerDnsMenu } from './cfDnsBridge.js';
+import { DnsQueue, normalizeDnsCommand, handleCfDnsMessage, cfDnsBridgeRouter, syncOwnerDnsMenu, DNS_MENU } from './cfDnsBridge.js';
 
 class Reply extends EventEmitter {
     statusCode = 200; writableEnded = false; body: any;
@@ -12,11 +12,27 @@ class Reply extends EventEmitter {
 }
 
 async function main() {
+    assert.deepEqual(DNS_MENU.map(row => row.command), ['dns', 'usecf', 'usefd', 'use6']);
     assert.equal(normalizeDnsCommand('2606:4700:ff00::1'), '/set 2606:4700:ff00::1');
     assert.equal(normalizeDnsCommand('/set 172.64.229.194'), '/set 172.64.229.194');
     assert.equal(normalizeDnsCommand('/dns@example_bot'), '/dns');
-    assert.equal(normalizeDnsCommand('/rescue'), '/rescue');
-    assert.equal(normalizeDnsCommand('/rescue 2606:4700::1'), '/rescue 2606:4700::1');
+    assert.equal(normalizeDnsCommand('/rescue'), '/dns');
+    assert.equal(normalizeDnsCommand('/usecf'), '/usecf');
+    assert.equal(normalizeDnsCommand('/usefd'), '/usefd');
+    assert.equal(normalizeDnsCommand('/use4'), '/usecf');
+    assert.equal(normalizeDnsCommand('/rescuetj'), '/tj');
+    assert.equal(normalizeDnsCommand('/rescuetj 39.105.108.60'), '/settj 39.105.108.60');
+    assert.equal(normalizeDnsCommand('/rescuetj ::1'), '/invalid');
+    assert.equal(normalizeDnsCommand('/tj@example_bot'), '/tj');
+    assert.equal(normalizeDnsCommand('/usetj'), '/usefd');
+    assert.equal(normalizeDnsCommand('/usetj nrt 2'), '/usetj NRT 2');
+    assert.equal(normalizeDnsCommand('/usetj 2'), '/usetj 2');
+    assert.equal(normalizeDnsCommand('/settj 39.105.24.90'), '/settj 39.105.24.90');
+    for (const text of ['/tj now', '/usetj NRT 0', '/usetj NRT 11', '/usetj NRT 1 extra',
+        '/settj 39.105.24.90:443', '/settj ::1', '/settj domain.example']) {
+        assert.equal(normalizeDnsCommand(text), '/invalid');
+    }
+    assert.equal(normalizeDnsCommand('/rescue 2606:4700::1'), '/set 2606:4700::1');
     for (const input of ['/start', '/help', '/tasks', '/ytdlp https://example.com']) {
         assert.equal(normalizeDnsCommand(input), null);
     }
@@ -45,6 +61,18 @@ async function main() {
     await new Promise(resolve => setTimeout(resolve, 30));
     assert.match(await timeout, /超时/);
     assert.equal(timeoutQueue.complete(waiter.body.id, 'late'), false);
+    const lostWorker = new DnsQueue(() => Date.now(), 100, 5);
+    const poll = new Reply(); lostWorker.poll({} as any, poll as any); poll.end();
+    const notClaimed = lostWorker.submitResult('/usecf', 12345);
+    await new Promise(resolve => setTimeout(resolve, 15));
+    assert.equal((await notClaimed).state, 'unavailable');
+    const latePoll = new Reply(); lostWorker.poll({} as any, latePoll as any);
+    assert.equal(latePoll.body, undefined); latePoll.end(); // Canceled jobs cannot be delivered late.
+    const uncertainQueue = new DnsQueue(() => Date.now(), 20);
+    const claim = new Reply(); uncertainQueue.poll({} as any, claim as any);
+    const claimed = uncertainQueue.submitResult('/usefd', 12345);
+    await new Promise(resolve => setTimeout(resolve, 30));
+    assert.equal((await claimed).state, 'uncertain'); // Never repeat an unconfirmed write.
 
     process.env.CF_DNS_BRIDGE_ENABLED = '1';
     process.env.CF_DNS_BRIDGE_KEY = 'a'.repeat(64);
@@ -93,7 +121,11 @@ async function main() {
     try {
         globalThis.fetch = (async () => new Response(JSON.stringify({ success: true, result: [] }))) as typeof fetch;
         await handleCfDnsMessage({ ...msg, text: '/rescue' });
-        assert.match(replies.pop()!, /甲骨文直接查询/);
+        assert.match(replies.pop()!, /线路：甲骨文/);
+        process.env.CF_PROXY_RESCUE_ENABLED = '1';process.env.CF_PROXY_RESCUE_NAME = 'tj.example.com';
+        process.env.CF_PROXY_RESCUE_IPS = '39.105.108.60';
+        await handleCfDnsMessage({ ...msg, text: '/rescuetj' });
+        assert.match(replies.pop()!, /FD（反代） · tj.example.com/);
         let release!: () => void; let started!: () => void;
         const requestStarted = new Promise<void>(resolve => { started = resolve; });
         const wait = new Promise<void>(resolve => { release = resolve; });
