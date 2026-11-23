@@ -23,7 +23,7 @@ import urllib.request
 from urllib.parse import urlsplit
 
 BASE = Path(__file__).resolve().parent
-COLOS = ('HKG', 'NRT', 'SIN')
+COLOS = ('HKG', 'NRT', 'SIN', 'KIX')
 SOURCE = 'https://raw.githubusercontent.com/skfoa/tg-proxy-fetcher/main/data/scan_ips.csv'
 SOURCE_LIMIT = 24 * 1024 * 1024
 BRANDS = (
@@ -407,7 +407,8 @@ def report_text(settings, selected, pending, notes, total, tested):
              '节点验证：' + ('仅本机允许列表，{} 轮'.format(settings.node_rounds) if settings.verify_node else '未启用；以下仅公开 CF 测试'),
              '下载测速：{} 轮，速度取中位数。'.format(settings.download_rounds)]
     for colo in COLOS:
-        lines.extend(['', {'HKG': '🇭🇰 香港 HKG', 'NRT': '🇯🇵 东京 NRT', 'SIN': '🇸🇬 新加坡 SIN'}[colo]])
+        lines.extend(['', {'HKG': '🇭🇰 香港 HKG', 'NRT': '🇯🇵 东京 NRT', 'SIN': '🇸🇬 新加坡 SIN',
+                          'KIX': '🇯🇵 大阪 KIX'}[colo]])
         rows = selected.get(colo, [])
         for group in PORT_GROUPS:
             grouped = [r for r in rows if port_group(r) == group]
@@ -513,7 +514,7 @@ def main():
     settings = Settings()
     settings.check_runtime()
     if sys.argv[1:] == ['--proxy-check']:
-        print('PROXY_CONFIG_OK seeds={} node_verification={} regions=HKG,NRT,SIN'.format(len(settings.seeds), int(settings.verify_node)))
+        print('PROXY_CONFIG_OK seeds={} node_verification={} regions={}'.format(len(settings.seeds), int(settings.verify_node), ','.join(COLOS)))
         return
     if sys.argv[1:] != ['--proxy']:
         raise Problem('Usage: cf-optimizer [--proxy|--proxy-check]')

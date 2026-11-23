@@ -126,6 +126,27 @@ class ProxyTests(unittest.TestCase):
             for path in other_lists.values(): self.assertEqual(path.read_text(), 'unchanged')
             self.assertFalse(any(path.name.startswith('.proxy-') for path in Path(directory).iterdir()))
 
+    def test_kix_seed_participates_in_node_download_and_report(self):
+        with tempfile.TemporaryDirectory() as directory:
+            settings = self.settings(directory, CF_PROXY_REFRESH_POOL='0')
+            row = proxy.seed_rows('ip,port,colo,provider\n166.88.14.71,8443,KIX,User supplied\n')[0]
+            settings.seeds.append(row)
+            settings.allowed_nodes = frozenset(proxy.key(r) for r in settings.seeds)
+            calls = []
+            def probe(item, node=False, download=False):
+                if proxy.key(item) == proxy.key(row): calls.append((node, download))
+                return dict(ok=True, colo=item['colo'], tcp_ms=80, ready_ms=500, mbps=22)
+            fake = types.SimpleNamespace(tcp=lambda r: dict(r, tcp_ms=80), probe=probe)
+            with patch('builtins.print'):
+                payload = proxy.scan(settings, fake)
+            self.assertEqual(payload['regions']['KIX'][0]['ip'], row['ip'])
+            self.assertEqual(payload['regions']['KIX'][0]['port'], 8443)
+            self.assertEqual(calls.count((True, False)), settings.node_rounds)
+            self.assertEqual(calls.count((False, True)), settings.download_rounds)
+            report = (Path(directory) / 'report.txt').read_text(encoding='utf-8')
+            self.assertIn('大阪 KIX', report)
+            self.assertIn('166.88.14.71:8443', report)
+
     def test_source_failure_falls_back_to_current_local_seeds_without_old_report(self):
         with tempfile.TemporaryDirectory() as directory:
             settings = self.settings(directory)
