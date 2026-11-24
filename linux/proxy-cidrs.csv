@@ -49,3 +49,12 @@ cidr,port,colo,provider
 8.148.212.0/24,443,SIN,Alibaba
 8.216.95.0/24,39738,NRT,Alibaba
 96.126.190.0/24,443,SIN,Evoxt
+20.47.101.0/24,8443,NRT,User supplied
+82.110.234.0/24,8443,NRT,User supplied
+141.11.139.0/24,8443,NRT,User supplied
+152.175.37.0/24,8443,NRT,User supplied
+167.104.164.0/24,443,NRT,User supplied
+45.32.32.0/24,8443,NRT,User supplied
+140.245.88.0/24,8443,NRT,User supplied
+154.83.93.0/24,2083,NRT,User supplied
+151.158.0.0/24,2053,HKG,User supplied
