@@ -4,6 +4,7 @@ import concurrent.futures as futures
 import csv
 import datetime as dt
 import http.client
+import hashlib
 import io
 import ipaddress
 import json
@@ -11,6 +12,7 @@ import math
 import os
 from pathlib import Path
 import re
+import random
 import socket
 import ssl
 import statistics
@@ -23,7 +25,17 @@ import urllib.request
 from urllib.parse import urlsplit
 
 BASE = Path(__file__).resolve().parent
-COLOS = ('HKG', 'NRT', 'SIN', 'KIX')
+# Cloudflare status Asia + Oceania groups, checked 2026-11-23.
+# ALA/AKX are also listed under Asia on Cloudflare's network page.
+PRIORITY_COLOS = ('HKG', 'NRT', 'SIN', 'KIX')
+COLOS = PRIORITY_COLOS + tuple(c for c in (
+    'ACX ADL AGR AIP AKL AKX ALA AMD AVA BBI BDQ BKK BLR BNE BOM BWN CAN CBR CCU CEB '
+    'CGD CGK CGO CGP CGY CHC CJB CKG CMB CNN CNX COK CRK CSX CTU CZX DAC DAD DEL DLC '
+    'DPS DYU FOC FRU FUK FUO GUM HAK HAN HBA HGH HKG HYD HYN ICN ISB IXC JAI JHB JOG '
+    'JRG JXG KCH KHH KHI KHN KIX KMG KNU KTM KUL KWE LHE LHW LUH LYA MAA MEL MFM '
+    'MLE MLG MNL NAG NOU NQZ NRT OKA PAT PBH PER PKX PNH PNQ PPT SGN SHA SIN SJW SUV '
+    'SYD SZX TAO TEN TEZ TNA TPE TYN UDR ULN URT VTE WLG WUH XFN XIY'
+).split() if c not in PRIORITY_COLOS)
 SOURCE = 'https://raw.githubusercontent.com/skfoa/tg-proxy-fetcher/main/data/scan_ips.csv'
 SOURCE_LIMIT = 24 * 1024 * 1024
 BRANDS = (
@@ -83,7 +95,7 @@ def endpoint(ip, port, colo, brand):
     return dict(ip=str(address), port=int(port), colo=colo, brand=brand)
 
 
-def seed_rows(text):
+def seed_rows(text, allow_empty=False):
     reader = csv.DictReader(io.StringIO(text.lstrip('\ufeff')))
     if not {'ip', 'port', 'colo', 'provider'}.issubset(reader.fieldnames or []):
         raise Problem('反代候选文件缺少 ip、port、colo、provider 字段。')
@@ -96,7 +108,7 @@ def seed_rows(text):
         except (ValueError, TypeError, KeyError):
             raise Problem('本机反代候选包含不合法的地址、端口或地区。') from None
         rows[key(item)] = item
-    if not rows:
+    if not rows and not allow_empty:
         raise Problem('本机反代候选文件为空。')
     return list(rows.values())
 
@@ -124,6 +136,45 @@ def remote_rows(text, limit=5000):
         rows[key(item)] = item
         if len(rows) > limit:
             raise Problem('远程候选数量超出本轮配置限制。')
+    return list(rows.values())
+
+
+def cidr_rows(text):
+    reader = csv.DictReader(io.StringIO(text.lstrip('\ufeff')))
+    if not {'cidr', 'port', 'colo', 'provider'}.issubset(reader.fieldnames or []):
+        raise Problem('反代网段候选文件缺少必要字段。')
+    rows = {}
+    for index, row in enumerate(reader):
+        if index >= 128:
+            raise Problem('反代网段候选最多允许 128 条。')
+        try:
+            network = ipaddress.IPv4Network(row['cidr'], strict=True)
+            if (network.prefixlen != 24 or not network.is_global or network.is_multicast
+                    or any(network.overlaps(cf) for cf in CF_RANGES)):
+                raise ValueError()
+            item = endpoint(str(network.network_address + 1), row['port'], row['colo'], row['provider'])
+        except (ValueError, TypeError, KeyError):
+            raise Problem('反代网段候选必须为公开第三方 /24 网段和合法端口。') from None
+        item.pop('ip')
+        item['cidr'] = str(network)
+        rows[(item['cidr'], item['port'])] = item
+    return list(rows.values())
+
+
+def sample_cidrs(ranges, count=16, cycle=None):
+    if cycle is None:
+        # Three-day rotation without any last-run/history file.
+        cycle = dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).date().toordinal() // 3
+    rows = {}
+    for item in ranges:
+        network = ipaddress.IPv4Network(item['cidr'])
+        seed = hashlib.sha256('{}:{}'.format(network, item['port']).encode('ascii')).digest()
+        offsets = list(range(1, 255))
+        random.Random(int.from_bytes(seed, 'big')).shuffle(offsets)
+        for index in range(count):
+            offset = offsets[(cycle * count + index) % len(offsets)]
+            row = endpoint(str(network.network_address + offset), item['port'], item['colo'], item['brand'])
+            rows[key(row)] = row
     return list(rows.values())
 
 
@@ -179,6 +230,26 @@ class Settings:
             raise Problem('无法读取本机反代候选文件。') from None
         # A remote CSV can never add permission to disclose the private node path.
         self.allowed_nodes = frozenset(key(p) for p in self.seeds)
+        # Public-only local discoveries never expand the private node allowlist.
+        try:
+            text = (base / 'proxy-public-candidates.csv').read_text(encoding='utf-8')
+            if len(text) > 65536:
+                raise Problem('本机公开候选文件过大。')
+            self.public_seeds = seed_rows(text, allow_empty=True)
+        except FileNotFoundError:
+            self.public_seeds = []
+        except OSError:
+            raise Problem('无法读取本机公开候选文件。') from None
+        self.cidr_samples = integer('CF_PROXY_CIDR_SAMPLES_PER_RANGE', 16, 1, 64)
+        try:
+            text = (base / 'proxy-cidrs.csv').read_text(encoding='utf-8')
+            if len(text) > 65536:
+                raise Problem('本机网段候选文件过大。')
+            self.cidr_seeds = sample_cidrs(cidr_rows(text), self.cidr_samples)
+        except FileNotFoundError:
+            self.cidr_seeds = []
+        except OSError:
+            raise Problem('无法读取本机网段候选文件。') from None
 
     def check_runtime(self):
         if not str(self.output).startswith('/run/') or self.output.is_symlink():
@@ -407,9 +478,11 @@ def report_text(settings, selected, pending, notes, total, tested):
              '节点验证：' + ('仅本机允许列表，{} 轮'.format(settings.node_rounds) if settings.verify_node else '未启用；以下仅公开 CF 测试'),
              '下载测速：{} 轮，速度取中位数。'.format(settings.download_rounds)]
     for colo in COLOS:
-        lines.extend(['', {'HKG': '🇭🇰 香港 HKG', 'NRT': '🇯🇵 东京 NRT', 'SIN': '🇸🇬 新加坡 SIN',
-                          'KIX': '🇯🇵 大阪 KIX'}[colo]])
         rows = selected.get(colo, [])
+        if not rows and colo not in PRIORITY_COLOS:
+            continue
+        lines.extend(['', {'HKG': '🇭🇰 香港 HKG', 'NRT': '🇯🇵 东京 NRT', 'SIN': '🇸🇬 新加坡 SIN',
+                          'KIX': '🇯🇵 大阪 KIX'}.get(colo, '🌏 ' + colo)])
         for group in PORT_GROUPS:
             grouped = [r for r in rows if port_group(r) == group]
             if not grouped:
@@ -440,12 +513,18 @@ def scan(settings, prober=None, fetcher=fetch_pool):
             rows.update((key(row), row) for row in fetcher(settings))
         except Exception:
             notes.append('候选池获取失败，本轮仅测试本机候选。')
+    rows.update((key(row), row) for row in settings.cidr_seeds)
+    rows.update((key(row), row) for row in settings.public_seeds)
     rows.update((key(row), row) for row in settings.seeds)
     status(settings, '反代 TCP 初筛：{} 条'.format(len(rows)))
     tcp = [result for _, result in parallel(list(rows.values()), prober.tcp, settings.workers,
            lambda n: status(settings, '反代 TCP 初筛 {}/{}'.format(n, len(rows))))]
     candidates = choose_ports(tcp, settings.public_per_colo, lambda row: row['tcp_ms'],
                               preferred=settings.allowed_nodes, per_brand=3)
+    # Bound public requests as APAC expands; preserve regional and port balance.
+    regional = {c: [r for r in candidates if r['colo'] == c] for c in COLOS}
+    candidates = [regional[c][i] for i in range(max((len(r) for r in regional.values()), default=0))
+                  for c in COLOS if i < len(regional[c])][:240]
     status(settings, '公开 CF 检查：{} 条'.format(len(candidates)))
     public = []
     for row, result in parallel(candidates, prober.probe, 6):

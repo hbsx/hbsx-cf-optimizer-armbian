@@ -7,7 +7,7 @@
 ## 默认行为
 
 - 默认每 **3 天、北京时间 03:00** 运行一次；关机时错过的任务不补跑。
-- 同一周期先运行官方 IPv4 优选，再运行 HKG/NRT/SIN/KIX 反代优选，各自通过 TG 推送。共用一个定时器并顺序执行，官方扫描失败后仍尝试反代优选。可用 `CF_PROXY_AUTO_ENABLED=0` 单独关闭自动反代优选。
+- 同一周期先运行官方 IPv4 优选，再运行亚太地区反代优选，优先 HKG/NRT/SIN/KIX，各自通过 TG 推送。共用一个定时器并顺序执行，官方扫描失败后仍尝试反代优选。可用 `CF_PROXY_AUTO_ENABLED=0` 单独关闭自动反代优选。
 - 六小时健康检查定时任务**默认关闭**。需要时可配置 `CF_HEALTH_ENABLED=1` 后重新安装启用，在北京时间 00:00、06:00、12:00、18:00 检查；也可手动运行 `cf-optimizer --health`。
 - 覆盖 Cloudflare 官方全部 IPv4 网段，先逐 `/24` 采样发现 NRT，再完整细扫最多 8 个候选 `/24`（2048 IP）。不是逐个扫描全部约 152 万个地址。
 - 地区验证必须返回 `colo=NRT`，下载响应 `CF-RAY` 也必须属于 NRT。
@@ -137,7 +137,7 @@ sudo systemctl disable --now cf-optimizer-health.timer
 
 ## 扫描与测速说明
 
-### 第三方反代优选（HKG / NRT / SIN / KIX）
+### 第三方反代优选（亚太地区）
 
 ```bash
 sudo cf-optimizer --proxy-check
@@ -151,9 +151,13 @@ systemctl show cf-optimizer-proxy -p ActiveState -p Result -p StatusText
 sudo cat /run/cf-optimizer/best-proxy-ips.json
 ```
 
-从 [skfoa/tg-proxy-fetcher 的公开 CSV](https://raw.githubusercontent.com/skfoa/tg-proxy-fetcher/main/data/scan_ips.csv) 获取候选，筛选 HKG、NRT、SIN、KIX、TLS 开启、上游失败计数为零的地址。除腾讯、阿里、华为、AWS、Oracle 等常见厂商外，也覆盖 ByteVirt、LucidaCloud、Leaseweb、VMISS、Zenlayer 等；其他具有有效 ASN 和厂商名称的来源也参与公开初筛。排除 CF 官方地址，避免混作第三方反代。默认公开候选上限 10000 条，每地区公开检查 40 条；按 443、8443、其他 TLS 端口轮流分配名额，每组同一厂商最多占 3 个公开检查名额。其他端口组兼顾不同实际端口，保留本机候选优先级。上游标签仅用于初筛；地区以本轮验证结果为准。仅请求列表中的具体 IP 和端口，不扫描厂商整段。
+从 [skfoa/tg-proxy-fetcher 的公开 CSV](https://raw.githubusercontent.com/skfoa/tg-proxy-fetcher/main/data/scan_ips.csv) 获取候选，筛选亚太地区、TLS 开启、上游失败计数为零的地址。除腾讯、阿里、华为、AWS、Oracle 等常见厂商外，也覆盖 ByteVirt、LucidaCloud、Leaseweb、VMISS、Zenlayer 等；其他具有有效 ASN 和厂商名称的来源也参与公开初筛。排除 CF 官方地址，避免混作第三方反代。默认公开候选上限 10000 条，每地区公开检查最多 40 条、全局最多 240 条；按 443、8443、其他 TLS 端口轮流分配名额，每组同一厂商最多占 3 个公开检查名额。其他端口组兼顾不同实际端口，保留本机候选优先级。上游标签仅用于初筛；地区以本轮验证结果为准。仅请求列表中的具体 IP 和端口，不扫描厂商整段。
 
-同时加载本机 `proxy-candidates.csv`，支持香港 HKG、东京 NRT、新加坡 SIN 和大阪 KIX。自带候选是在 2026-11-20 的 N1 测试中可用的入口，不保证以后一直有效。安装器保留已有候选文件，方便维护自己的列表；新安装才复制默认文件。
+同时加载本机 `proxy-candidates.csv`，优先香港 HKG、东京 NRT、新加坡 SIN 和大阪 KIX，其他亚太机房也参与。允许范围依据 [Cloudflare 状态页](https://www.cloudflarestatus.com/)的 Asia/Oceania 分组及[网络机房列表](https://www.cloudflare.com/network/)，在代码中固定，不根据入口 IP 的注册地猜测。自带候选在过去的 N1 测试中可用，不保证以后一直有效。安装器保留已有候选文件，方便维护自己的列表；新安装才复制默认文件。
+
+单次公开粗筛达标的新地址保存在 `proxy-public-candidates.csv`，后续可参与公开检查，未完成实际节点验证前不会参与 DNS 更新。此文件不会扩充私有节点验证允许列表；安装升级会保留本机已有版本。粗筛结果不等同于正式三轮复测达标。
+
+`proxy-cidrs.csv` 保存第三方 `/24` 网段、端口、已知机房及来源；同一个网段的不同端口分别保留。每轮每段默认采样 16 个地址（`CF_PROXY_CIDR_SAMPLES_PER_RANGE`，允许 1–64），按北京时间三天周期轮换，每 16 个周期覆盖该段的 254 个主机地址。不保存轮换历史，不在每次运行时写配置文件。网段标签仅用于分配初筛名额，相邻 IP 必须重新通过公开 CF 检查并确认实际机房在亚太，不能直接作为有效节点或 DNS 更新候选。网段池不会扩充私有节点验证允许列表。默认不遍历全部网段，以控制 N1 的运行时间；公开检查全局 240 条、实际节点验证全局 30 条的上限继续生效。
 
 所有 TCP、TLS、WebSocket 和下载测试都绑定配置中的物理网卡，绕过本机 Mihomo；候选池获取和 TG 推送使用配置中的代理。先做有数量上限的 TCP/公开 CF 检查，再按地区选择候选；下载逐条进行，默认三轮、每轮 4 MiB，所有轮次完整成功、地区一致且不低于 `CF_PROXY_MIN_MBPS=8` 才入选。HTTP 429 会停止本轮，不把旧结果当成新结果。
 

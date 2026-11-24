@@ -24,7 +24,7 @@ class ProxyTests(unittest.TestCase):
                    CFST_IPV6_NODE_PATH='/private-path', CF_PROXY_NODE_ROUNDS='2',
                    CF_PROXY_DOWNLOAD_ROUNDS='2', CF_PROXY_DOWNLOAD_PER_COLO='1')
         env.update(overrides)
-        return proxy.Settings(env)
+        return proxy.Settings(env, base=Path(directory))
 
     def test_seeds_keep_endpoint_ports_and_reject_non_public_addresses(self):
         self.assertEqual(proxy.seed_rows('ip,port,colo,provider\n111.119.223.194,10008,SIN,Huawei\n')[0]['port'], 10008)
@@ -146,6 +146,74 @@ class ProxyTests(unittest.TestCase):
             report = (Path(directory) / 'report.txt').read_text(encoding='utf-8')
             self.assertIn('大阪 KIX', report)
             self.assertIn('166.88.14.71:8443', report)
+
+    def test_apac_includes_korea_and_australia_but_excludes_us_and_europe(self):
+        text = 'ip,port,tls,colo,asn,isp,fail_count\n'
+        for i, colo in enumerate(['ICN', 'SYD', 'HKG', 'SJC', 'LAX', 'AMS'], 1):
+            text += '43.155.1.{},8443,true,{},AS132203,Tencent,0\n'.format(i, colo)
+        self.assertEqual({r['colo'] for r in proxy.remote_rows(text)}, {'ICN', 'SYD', 'HKG'})
+
+    def test_public_local_candidates_do_not_authorize_private_node_checks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / 'proxy-public-candidates.csv').write_text(
+                'ip,port,colo,provider\n43.155.153.147,2096,ICN,User supplied\n')
+            settings = self.settings(directory, CF_PROXY_REFRESH_POOL='0')
+            row = settings.public_seeds[0]
+            self.assertNotIn(proxy.key(row), settings.allowed_nodes)
+            with patch.object(proxy.Prober, 'connect') as connect, self.assertRaises(proxy.Problem):
+                proxy.Prober(settings).probe(row, node=True)
+            connect.assert_not_called()
+            fake = types.SimpleNamespace(tcp=lambda r:dict(r,tcp_ms=30),
+                probe=lambda r,**_:dict(ok=True,colo=r['colo'],tcp_ms=30,ready_ms=100,mbps=50))
+            with patch('builtins.print'):
+                payload = proxy.scan(settings, fake)
+            self.assertEqual(payload['regions']['ICN'], [])
+            self.assertTrue(any(r['ip'] == row['ip'] for r in payload['unverified']))
+            self.assertLess(len((Path(directory)/'report.txt').read_text(encoding='utf-8')), 2000)
+
+    def test_expanded_apac_pool_has_a_global_public_request_budget(self):
+        with tempfile.TemporaryDirectory() as directory:
+            settings = self.settings(directory)
+            settings.verify_node = False
+            remote = [proxy.endpoint('43.155.{}.{}'.format(i//250, i%250+1), 8443, c, 'Tencent')
+                      for i, c in enumerate(proxy.COLOS * 3)]
+            public = []
+            def probe(row, node=False, download=False):
+                if not node and not download: public.append(row)
+                return dict(ok=True,colo=row['colo'],tcp_ms=30,ready_ms=100,mbps=50)
+            fake = types.SimpleNamespace(tcp=lambda r:dict(r,tcp_ms=30),probe=probe)
+            with patch('builtins.print'):
+                proxy.scan(settings, fake, lambda _:remote)
+            self.assertEqual(len(public), 240)
+            self.assertTrue(set(proxy.PRIORITY_COLOS).issubset({r['colo'] for r in public}))
+
+    def test_cidr_rotation_covers_hosts_without_private_node_permission(self):
+        text = 'cidr,port,colo,provider\n43.155.153.0/24,2096,ICN,Tencent\n'
+        ranges = proxy.cidr_rows(text)
+        first = proxy.sample_cidrs(ranges, 16, cycle=0)
+        self.assertEqual(first, proxy.sample_cidrs(ranges,16,cycle=0))
+        self.assertEqual(len(first),16)
+        self.assertFalse({proxy.key(r) for r in first} &
+                         {proxy.key(r) for r in proxy.sample_cidrs(ranges,16,cycle=1)})
+        complete = {r['ip'] for c in range(16) for r in proxy.sample_cidrs(ranges,16,cycle=c)}
+        self.assertEqual(len(complete),254)
+        self.assertNotIn('43.155.153.0',complete)
+        self.assertNotIn('43.155.153.255',complete)
+        self.assertTrue(all(r['port']==2096 and r['colo']=='ICN' for r in first))
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory)/'proxy-cidrs.csv').write_text(text)
+            settings = self.settings(directory)
+            self.assertEqual(len(settings.cidr_seeds),16)
+            self.assertTrue(settings.allowed_nodes.isdisjoint(proxy.key(r) for r in settings.cidr_seeds))
+            with patch.object(proxy.Prober,'connect') as connect,self.assertRaises(proxy.Problem):
+                proxy.Prober(settings).probe(settings.cidr_seeds[0],node=True)
+            connect.assert_not_called()
+
+    def test_cidr_pool_rejects_large_private_cf_and_unaligned_ranges(self):
+        for network in ['43.155.152.0/23','43.155.153.0/25','43.155.153.1/24',
+                        '192.168.1.0/24','104.16.0.0/24','224.0.0.0/24']:
+            with self.subTest(network=network),self.assertRaises(proxy.Problem):
+                proxy.cidr_rows('cidr,port,colo,provider\n{},8443,ICN,Tencent\n'.format(network))
 
     def test_source_failure_falls_back_to_current_local_seeds_without_old_report(self):
         with tempfile.TemporaryDirectory() as directory:
