@@ -52,7 +52,8 @@ def configuration(settings):
     values = dict(env, CF_DNS_ENABLED='1', CF_DNS_NAME=name)
     dns = dns_update.configuration(values)
     port_text = env.get('CF_PROXY_DNS_PORT', '443')
-    if not re.fullmatch(r'[1-9][0-9]{0,4}', port_text) or not 1 <= int(port_text) <= 65535:
+    if (not re.fullmatch(r'[1-9][0-9]{0,4}', port_text) or not 1 <= int(port_text) <= 65535
+            or int(port_text) in proxy_scan.PLAINTEXT_PORTS):
         raise control.Problem('反代 DNS 端口配置不合法。')
     config = proxy_scan.Settings(dict(env, CF_PROXY_VERIFY_NODE='1'), base=control.BASE)
     return dns, int(port_text), config
@@ -76,6 +77,7 @@ def snapshot(config, port, now=None):
         for region in proxy_scan.COLOS:
             for row in data['regions'].get(region, []):
                 if (row.get('node_verified') is not True or row.get('port') != port
+                        or row.get('port') in proxy_scan.PLAINTEXT_PORTS
                         or row.get('colo') != region or proxy_scan.key(row) not in config.allowed_nodes):
                     continue
                 address = ipaddress.IPv4Address(row['ip'])

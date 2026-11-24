@@ -38,6 +38,8 @@ COLOS = PRIORITY_COLOS + tuple(c for c in (
 ).split() if c not in PRIORITY_COLOS)
 SOURCE = 'https://raw.githubusercontent.com/skfoa/tg-proxy-fetcher/main/data/scan_ips.csv'
 SOURCE_LIMIT = 24 * 1024 * 1024
+# Exclude conventional HTTP ports even when an upstream source labels them TLS.
+PLAINTEXT_PORTS = frozenset((80, 8080, 8880, 2052, 2082, 2086, 2095))
 BRANDS = (
     ('Tencent', ('tencent',)), ('Alibaba', ('alibaba', 'aliyun')),
     ('Huawei', ('huawei',)), ('AWS', ('amazon',)), ('Oracle', ('oracle',)),
@@ -88,7 +90,9 @@ def key(row):
 
 def endpoint(ip, port, colo, brand):
     address = ipaddress.IPv4Address(ip)
-    if not address.is_global or address.is_multicast or not re.fullmatch(r'[0-9]{1,5}', str(port)) or not 1 <= int(port) <= 65535:
+    if (not address.is_global or address.is_multicast
+            or not re.fullmatch(r'[0-9]{1,5}', str(port)) or not 1 <= int(port) <= 65535
+            or int(port) in PLAINTEXT_PORTS):
         raise ValueError('Invalid public IPv4 endpoint')
     if colo not in COLOS or not re.fullmatch(r'[A-Za-z0-9 ._-]{1,40}', brand):
         raise ValueError('Invalid endpoint metadata')
@@ -335,6 +339,8 @@ class Prober:
             return None
 
     def probe(self, row, node=False, download=False):
+        if row.get('port') in PLAINTEXT_PORTS:
+            raise Problem('已禁用 80、8080 等明文端口；仅检查 TLS 候选。')
         # Check membership BEFORE accessing/sending the private hostname/path.
         if node and (not self.settings.verify_node or key(row) not in self.settings.allowed_nodes):
             raise Problem('该 IP:端口未列入本机节点验证允许列表。')

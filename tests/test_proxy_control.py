@@ -65,6 +65,15 @@ class ProxyControlTests(unittest.TestCase):
         rows,_=pc.snapshot(self.config,443)
         self.assertEqual([r['ip'] for r in rows],['39.105.108.60'])
 
+    def test_cached_http_candidate_cannot_be_used_even_with_matching_port(self):
+        for port in (80,8080):
+            with self.subTest(port=port):
+                row=dict(self.row,port=port,mbps=1000)
+                self.config.allowed_nodes=frozenset([(row['ip'],port)])
+                self.write_snapshot(regions={'HKG':[row]})
+                rows,_=pc.snapshot(self.config,port)
+                self.assertEqual(rows,[])
+
     def test_switch_targets_separate_hostname_and_rechecks_twice(self):
         c, probe = Client(), Mock(return_value=20)
         answer = self.call('/usetj HKG 1', c, probe)

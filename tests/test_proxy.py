@@ -35,6 +35,29 @@ class ProxyTests(unittest.TestCase):
             with self.subTest(ip=ip, port=port, colo=colo), self.assertRaises(proxy.Problem):
                 proxy.seed_rows('ip,port,colo,provider\n{},{},{},Alibaba\n'.format(ip, port, colo))
 
+    def test_plain_http_ports_are_rejected_from_local_and_subnet_pools(self):
+        for port in proxy.PLAINTEXT_PORTS:
+            with self.subTest(port=port):
+                with self.assertRaises(proxy.Problem):
+                    proxy.seed_rows('ip,port,colo,provider\n43.155.153.147,{},NRT,Tencent\n'.format(port))
+                with self.assertRaises(proxy.Problem):
+                    proxy.cidr_rows('cidr,port,colo,provider\n43.155.153.0/24,{},NRT,Tencent\n'.format(port))
+
+    def test_remote_tls_label_cannot_reintroduce_http_ports(self):
+        text = 'ip,port,tls,colo,asn,isp,fail_count\n'
+        for port in sorted(proxy.PLAINTEXT_PORTS | {443, 8443, 39738}):
+            text += '43.155.153.147,{},true,NRT,AS132203,Tencent,0\n'.format(port)
+        self.assertEqual({r['port'] for r in proxy.remote_rows(text)}, {443,8443,39738})
+
+    def test_http_probe_is_rejected_before_any_connection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            prober = proxy.Prober(self.settings(directory))
+            with patch.object(prober,'connect') as connect:
+                for port in (80,8080):
+                    with self.subTest(port=port),self.assertRaises(proxy.Problem):
+                        prober.probe(dict(ip='43.155.153.147',port=port))
+                connect.assert_not_called()
+
     def test_source_filters_vendor_tls_failure_region_and_keeps_ports(self):
         output = io.StringIO()
         writer = csv.writer(output)
