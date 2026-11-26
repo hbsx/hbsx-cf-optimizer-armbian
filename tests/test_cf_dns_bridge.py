@@ -27,7 +27,7 @@ class BridgeTests(unittest.TestCase):
         self.assertFalse(bridge.accepted_job(self.job, self.settings, ['a' * 32], 1050))
         # Valid syntax reaches DNS core, including its explicit non-Cloudflare refusal.
         self.assertTrue(bridge.accepted_job(dict(self.job, command='/set 1.1.1.1'), self.settings, [], 1050))
-        for text in ('/usecf', '/usefd', '/use6', '/tj', '/usetj', '/usetj HKG 2', '/usetj 2', '/settj 39.105.24.90'):
+        for text in ('/usecf', '/usefd', '/use6', '/fd443', '/fd8443', '/fdscan', '/tj', '/usetj', '/usetj HKG 2', '/usetj 2', '/settj 39.105.24.90'):
             self.assertTrue(bridge.accepted_job(dict(self.job, command=text), self.settings, [], 1050))
         for text in ('/tj extra', '/usetj HKG 0', '/usetj HKG 11', '/settj 127.0.0.1',
                      '/settj 39.105.24.90:8443', '/settj ::1'):
@@ -78,6 +78,30 @@ class BridgeTests(unittest.TestCase):
                 patch.object(bridge.control.ControlDNS, 'request') as request:
             self.assertEqual(bridge.execute_job(dict(self.job, command='/usecf'), self.settings)[1], 'failed')
         request.assert_not_called()
+
+    def test_dns_queries_all_three_names_and_scan_does_not_access_dns(self):
+        class QueryClient:
+            def __init__(self,token,zone,name):self.name=name
+            def records(self):return [dict(type='A',content='39.105.24.90')]
+        settings=SimpleNamespace(dns=('token','zone','bj.example.com'))
+        def configuration(settings,port):return ('token','zone','tj.example.com' if port==443 else 'nj.example.com'),port,'config'
+        with patch.object(bridge.control,'ControlDNS',QueryClient),patch.object(bridge.proxy_control,'configuration',side_effect=configuration):
+            reply,state=bridge.execute_job(dict(self.job,command='/dns'),settings)
+        self.assertEqual(state,'ok')
+        for name in ['bj.example.com','tj.example.com','nj.example.com']:self.assertIn(name,reply)
+        import manual_proxy_scan
+        with patch.object(manual_proxy_scan,'request_scan',return_value='started') as start,patch.object(bridge.control.ControlDNS,'records') as records:
+            reply,state=bridge.execute_job(dict(self.job,command='/fdscan'),settings)
+        start.assert_called_once_with(self.job['expires_at']);records.assert_not_called();self.assertEqual(state,'ok')
+
+    def test_dual_fd_cache_keeps_port_winners_separate(self):
+        settings=SimpleNamespace(runtime=Path('not-present'))
+        def config(settings,port):return ('token','zone','fd.example.com'),port,port
+        def rows(config,port,now):return [dict(ip='39.105.24.90' if port==443 else '166.88.14.71')],'2026-11-26T03:00:00+08:00'
+        with patch.object(bridge.proxy_control,'configuration',side_effect=config),patch.object(bridge.proxy_control,'snapshot',side_effect=rows):
+            payload=bridge.snapshot_payload(settings,1000)
+        self.assertEqual(payload['fd']['port'],443);self.assertEqual(payload['fd8443']['port'],8443)
+        self.assertNotEqual(payload['fd']['ip'],payload['fd8443']['ip'])
 
     def test_reverse_proxy_cache_uses_existing_sorted_snapshot_and_fixed_port(self):
         settings = SimpleNamespace(runtime=Path('not-present'))

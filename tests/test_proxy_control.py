@@ -74,6 +74,30 @@ class ProxyControlTests(unittest.TestCase):
                 rows,_=pc.snapshot(self.config,port)
                 self.assertEqual(rows,[])
 
+    def test_8443_command_uses_8443_winner_and_separate_domain(self):
+        row=dict(self.row,ip='166.88.14.71',port=8443,colo='KIX',mbps=30)
+        self.config.allowed_nodes=frozenset([('39.105.108.60',443),('166.88.14.71',8443)])
+        self.write_snapshot(regions={'HKG':[dict(self.row,mbps=1000)],'KIX':[row]})
+        client=Client();client.name='nj.example.com'
+        for record in client.rows:record['name']=client.name
+        probe=Mock(return_value=20)
+        with patch.object(pc,'configuration',return_value=(('token','zone',client.name),8443,self.config)) as cfg:
+            result=self.call('/fd8443',client,probe)
+        cfg.assert_called_once_with(self.settings,8443)
+        self.assertEqual(client.rows[0]['content'],'166.88.14.71')
+        self.assertEqual(probe.call_count,2)
+        self.assertTrue(all(c.args[0]['port']==8443 for c in probe.call_args_list))
+        self.assertIn('nj.example.com',result)
+
+    def test_443_command_does_not_choose_a_faster_8443_winner(self):
+        row=dict(self.row,ip='166.88.14.71',port=8443,colo='KIX',mbps=1000)
+        self.config.allowed_nodes=frozenset([('39.105.108.60',443),('166.88.14.71',8443)])
+        self.write_snapshot(regions={'HKG':[self.row],'KIX':[row]})
+        client=Client();probe=Mock(return_value=20)
+        self.call('/fd443',client,probe)
+        self.assertEqual(client.rows[0]['content'],self.row['ip'])
+        self.assertTrue(all(c.args[0]['port']==443 for c in probe.call_args_list))
+
     def test_switch_targets_separate_hostname_and_rechecks_twice(self):
         c, probe = Client(), Mock(return_value=20)
         answer = self.call('/usetj HKG 1', c, probe)
@@ -178,6 +202,22 @@ class ProxyControlTests(unittest.TestCase):
                 patch.object(control,'fcntl',fake):
             with pc.scan_update_lock():pass
         fake.flock.assert_called_once_with(9,6)
+
+
+class ProxyPortConfigurationTests(unittest.TestCase):
+    def test_explicit_ports_select_separate_names_without_rewriting_environment(self):
+        env=dict(CF_PROXY_DNS_NAME='tj.example.com',CF_PROXY_DNS_PORT='443',CF_PROXY_DNS_8443_NAME='nj.example.com')
+        settings=SimpleNamespace(proxy_control_env=env,dns=('token','zone','bj.example.com'))
+        original=dict(env)
+        def dns(values):return 'token','zone',values['CF_DNS_NAME']
+        with patch.object(pc.dns_update,'configuration',side_effect=dns),patch.object(pc.proxy_scan,'Settings',return_value='config'):
+            self.assertEqual(pc.configuration(settings,443)[:2],(('token','zone','tj.example.com'),443))
+            self.assertEqual(pc.configuration(settings,8443)[:2],(('token','zone','nj.example.com'),8443))
+            del env['CF_PROXY_DNS_8443_NAME']
+            with self.assertRaises(control.Problem):pc.configuration(settings,8443)
+            env['CF_PROXY_DNS_8443_NAME']='tj.example.com'
+            with self.assertRaises(control.Problem):pc.configuration(settings,8443)
+        self.assertEqual(original['CF_PROXY_DNS_NAME'],env['CF_PROXY_DNS_NAME'])
 
 
 if __name__ == '__main__':

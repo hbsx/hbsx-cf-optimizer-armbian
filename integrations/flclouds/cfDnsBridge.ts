@@ -7,16 +7,19 @@ import { CandidateCache, oracleDnsCommand, runPreferred, type N1Result } from '.
 type Job = { id: string; command: string; sender_id: number; chat_id: number; created_at: number; expires_at: number };
 type Pending = { job: Job; claimed: boolean; finish: (reply: N1Result) => void; timer: NodeJS.Timeout };
 export const DNS_MENU = [
-    { command: 'dns', description: '查看 CF 和 FD当前 IP' },
+    { command: 'dns', description: '查看 bj、tj、nj 当前 IP' },
     { command: 'usecf', description: '使用 N1 的 CF IPv4 优选第一名' },
-    { command: 'usefd', description: '使用 N1 的反代优选第一名（443）' },
+    { command: 'fd443', description: 'FD 443 第一名更新 tj 域名' },
+    { command: 'fd8443', description: 'FD 8443 第一名更新 nj 域名' },
     { command: 'use6', description: '使用 N1 的 CF IPv6 优选第一名' },
+    { command: 'fdscan', description: '手动启动 N1 的 FD 优选并推送' },
 ];
 
 export function normalizeDnsCommand(text: string): string | null {
     const input = text.trim();
     if (isIP(input) && !input.includes('%')) return `/set ${input}`;
-    const match = input.match(/^\/(dns|set|usecf|usefd|use4|use6|rescue|tj|usetj|settj|rescuetj)(?:@\w+)?(?:\s+([\s\S]*))?$/i);
+    if (/^(fd443|fd8443|fdscan)$/i.test(input)) return `/${input.toLowerCase()}`;
+    const match = input.match(/^\/(dns|set|usecf|usefd|use4|use6|rescue|tj|usetj|settj|rescuetj|fd443|fd8443|fdscan)(?:@\w+)?(?:\s+([\s\S]*))?$/i);
     if (!match) return null;
     let name = match[1].toLowerCase();
     const args = (match[2] || '').trim();
@@ -177,7 +180,7 @@ type Message = { text: string; senderId: number; chatId: string; isPrivate: bool
 
 export async function handleCfDnsMessage(message: Message): Promise<boolean> {
     if (!configured()) return false;
-    if (!message.allowBareIp && isIP(message.text.trim())) return false;
+    if (!message.allowBareIp && (isIP(message.text.trim()) || /^(fd443|fd8443|fdscan)$/i.test(message.text.trim()))) return false;
     const command = normalizeDnsCommand(message.text);
     if (command === null) return false; // Preserve all existing command dispatch.
     if (String(message.senderId) !== process.env.CF_DNS_OWNER_ID || !message.isPrivate
@@ -192,7 +195,7 @@ export async function handleCfDnsMessage(message: Message): Promise<boolean> {
         return true;
     }
     if (command === '/invalid') {
-        await message.reply('/dns 查看 CF 和 FD 当前 IP；/usecf 使用 CF IPv4 第一名；/usefd 使用反代第一名；/use6 使用 CF IPv6 第一名。默认 N1，连接不通时自动使用甲骨文备用线路；测速全部由 N1 完成。');
+        await message.reply('/dns 查看 bj、tj、nj；/fd443 更新 tj；/fd8443 更新 nj；/fdscan 手动启动 FD 优选；/usecf、/use6 切换 CF。更新默认 N1，不通时用甲骨文；测速只在 N1。');
         return true;
     }
     if (controllerBusy || queue.busy()) {
@@ -201,7 +204,7 @@ export async function handleCfDnsMessage(message: Message): Promise<boolean> {
     }
     controllerBusy = true; // Reserve before the first await, across normal and rescue commands.
     try {
-        await message.reply(command === '/dns' || command === '/tj' ? '正在查询当前 DNS…' : '正在切换优选 IP，默认使用 N1…');
+        await message.reply(command === '/fdscan' ? '正在请求 N1 启动 FD 优选…' : command === '/dns' || command === '/tj' ? '正在查询当前 DNS…' : '正在切换优选 IP，默认使用 N1…');
         try {
             const reply = await runPreferred(command,
                 () => queue.submitResult(command, message.senderId),

@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch owner-authorized RAM requests for manual FD selection
+
+[Path]
+PathExists=/run/cf-optimizer-bridge/fdscan.request
+Unit=cf-optimizer-fd-request.service
+
+[Install]
+WantedBy=multi-user.target

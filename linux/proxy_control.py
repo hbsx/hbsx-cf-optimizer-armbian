@@ -44,14 +44,25 @@ def parse(text):
     raise control.Problem(USAGE)
 
 
-def configuration(settings):
+def configuration(settings, requested_port=None):
     env = settings.proxy_control_env
-    name = env.get('CF_PROXY_DNS_NAME', '').lower().rstrip('.')
+    legacy_port = env.get('CF_PROXY_DNS_PORT', '443')
+    if requested_port is not None and requested_port not in (443, 8443):
+        raise control.Problem('FD 更新仅支持 443 或 8443。')
+    port_text = str(requested_port) if requested_port is not None else legacy_port
+    name = env.get('CF_PROXY_DNS_{}_NAME'.format(port_text), '')
+    if not name and port_text == legacy_port:
+        name = env.get('CF_PROXY_DNS_NAME', '')
+    name = name.lower().rstrip('.')
     if not name or name == settings.dns[2]:
         raise control.Problem('请配置独立的 CF_PROXY_DNS_NAME；原优选域名不会被修改。')
+    other = env.get('CF_PROXY_DNS_{}_NAME'.format('8443' if port_text == '443' else '443'), '')
+    if not other and port_text == '8443' and legacy_port == '443':
+        other = env.get('CF_PROXY_DNS_NAME', '')
+    if other and name == other.lower().rstrip('.'):
+        raise control.Problem('443 和 8443 必须使用不同的 FD 域名。')
     values = dict(env, CF_DNS_ENABLED='1', CF_DNS_NAME=name)
     dns = dns_update.configuration(values)
-    port_text = env.get('CF_PROXY_DNS_PORT', '443')
     if (not re.fullmatch(r'[1-9][0-9]{0,4}', port_text) or not 1 <= int(port_text) <= 65535
             or int(port_text) in proxy_scan.PLAINTEXT_PORTS):
         raise control.Problem('反代 DNS 端口配置不合法。')
@@ -111,11 +122,15 @@ def verify(row, config):
 
 
 def handle(text, settings, client=None, probe=None, sleep=None, lock=None):
+    target_port = None
+    if text.strip() in ('/fd443', '/fd8443'):
+        target_port = int(text.strip()[3:])
+        text = '/usetj'
     parsed = parse(text)
     if parsed is None:
         raise control.Problem(USAGE)
     command, arg, rank = parsed
-    dns, port, config = configuration(settings)
+    dns, port, config = configuration(settings, target_port) if target_port else configuration(settings)
     client = client or control.ControlDNS(*dns)
     if command == '/tj':
         records = client.records()

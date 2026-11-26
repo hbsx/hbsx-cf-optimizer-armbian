@@ -3,11 +3,11 @@ import { CloudflareRescue, rescueCandidate, rescueSwitch, RescueProblem } from '
 import { proxyRescueConfiguration } from './cfProxyRescue.js';
 
 export type N1Result = { state: 'ok' | 'unavailable' | 'failed' | 'uncertain' | 'busy'; reply: string };
-type Slot = 'cf4' | 'cf6' | 'fd';
+type Slot = 'cf4' | 'cf6' | 'fd' | 'fd8443';
 type Candidate = { ip: string; generated_at: string; port?: number };
-const slots: Slot[] = ['cf4', 'cf6', 'fd'];
+const slots: Slot[] = ['cf4', 'cf6', 'fd', 'fd8443'];
 
-// Only three N1-measured winners are retained in process memory. No remote tests.
+// Four N1-measured winners are retained in process memory. No remote tests.
 export class CandidateCache {
     private values: Partial<Record<Slot, Candidate>> = {};
     constructor(private env: NodeJS.ProcessEnv = process.env, private now = () => Date.now()) {}
@@ -26,8 +26,10 @@ export class CandidateCache {
             const row = raw as Candidate;
             if (typeof row.ip !== 'string' || typeof row.generated_at !== 'string'
                 || row.generated_at.length > 50 || !this.fresh(row)) throw new RescueProblem('Stale or invalid candidate');
-            if (key === 'fd') {
-                const config = proxyRescueConfiguration(this.env);
+            if (key === 'fd' || key === 'fd8443') {
+                let config: ReturnType<typeof proxyRescueConfiguration>;
+                try { config = proxyRescueConfiguration(this.env, key === 'fd' ? 443 : 8443); }
+                catch { continue; }
                 if (row.port !== Number(config.port) || isIP(row.ip) !== 4 || !config.ips.includes(row.ip)) {
                     // A snapshot can never enlarge the independently configured rescue allowlist.
                     continue;
@@ -35,7 +37,7 @@ export class CandidateCache {
             } else if (isIP(rescueCandidate(row.ip)) !== (key === 'cf4' ? 4 : 6)) {
                 throw new RescueProblem('Candidate family mismatch');
             }
-            next[key] = { ip: row.ip, generated_at: row.generated_at, ...(key === 'fd' ? { port: row.port } : {}) };
+            next[key] = { ip: row.ip, generated_at: row.generated_at, ...(key === 'fd' || key === 'fd8443' ? { port: row.port } : {}) };
         }
         this.values = next;
     }
@@ -54,12 +56,13 @@ function display(name: string, rows: { type: string; content: string }[]) {
 }
 
 export async function oracleDnsCommand(command: string, cache: CandidateCache): Promise<string> {
+    if (command === '/fdscan') return '手动 FD 优选只能由 N1 执行。N1 当前未连接，未启动扫描。';
     if (command === '/dns' || command === '/tj') {
-        const queries = command === '/tj' ? ['fd'] : ['cf', 'fd'];
+        const queries = command === '/tj' ? ['fd', 'fd8443'] : ['cf', 'fd', 'fd8443'];
         const replies = await Promise.all(queries.map(async kind => {
             try {
-                const client = kind === 'cf' ? new CloudflareRescue() : proxyRescueConfiguration().client;
-                return `${kind === 'cf' ? 'CF' : 'FD'} · ${display(client.name, await client.records())}`;
+                const client = kind === 'cf' ? new CloudflareRescue() : proxyRescueConfiguration(process.env, kind === 'fd8443' ? 8443 : 443).client;
+                return `${kind === 'cf' ? 'CF' : kind === 'fd8443' ? 'FD 8443' : 'FD 443'} · ${display(client.name, await client.records())}`;
             } catch (error) {
                 return `${kind.toUpperCase()}：${error instanceof RescueProblem ? error.message : '查询失败'}`;
             }
@@ -67,19 +70,19 @@ export async function oracleDnsCommand(command: string, cache: CandidateCache): 
         return replies.join('\n\n') + '\n线路：甲骨文（自动备用）。';
     }
     let address: string, timestamp = '';
-    if (command === '/usecf' || command === '/use6' || command === '/usefd') {
-        const row = cache.get(command === '/usecf' ? 'cf4' : command === '/use6' ? 'cf6' : 'fd');
+    if (command === '/usecf' || command === '/use6' || command === '/usefd' || command === '/fd443' || command === '/fd8443') {
+        const row = cache.get(command === '/usecf' ? 'cf4' : command === '/use6' ? 'cf6' : command === '/fd8443' ? 'fd8443' : 'fd');
         address = row.ip; timestamp = `\nN1 优选时间：${row.generated_at}`;
     } else if (command.startsWith('/set ') || command.startsWith('/settj ')) {
         address = command.split(' ')[1];
     } else throw new RescueProblem('备用切换请使用 /usecf、/usefd 或 /use6。');
-    if (command === '/usefd' || command.startsWith('/settj ')) {
-        const { client, ips, port } = proxyRescueConfiguration();
+    if (command === '/usefd' || command === '/fd443' || command === '/fd8443' || command.startsWith('/settj ')) {
+        const { client, ips, port } = proxyRescueConfiguration(process.env, command === '/fd8443' ? 8443 : 443);
         const validate = (value: string) => {
             if (isIP(value) !== 4 || !ips.includes(value)) throw new RescueProblem('反代 IP 不在备用允许列表中，DNS 未修改。');
             return value;
         };
-        return await rescueSwitch(address, client, validate, '/dns') + timestamp + `\n反代端口：${port}（保持不变）。`;
+        return await rescueSwitch(address, client, validate, '/dns') + timestamp + `\nFD 端口：${port}（保持不变）。`;
     }
     return await rescueSwitch(address, new CloudflareRescue(), rescueCandidate, '/dns') + timestamp;
 }
@@ -87,6 +90,11 @@ export async function oracleDnsCommand(command: string, cache: CandidateCache): 
 export async function runPreferred(command: string, normal: () => Promise<N1Result>,
     backup: () => Promise<string>, readback: () => Promise<string>): Promise<string> {
     const result = await normal();
+    if (command === '/fdscan') {
+        if (result.state === 'unavailable') return backup();
+        if (result.state === 'uncertain') return 'N1 的优选启动结果尚未确认，未重复提交。请等待原机器人推送结果后再检查。';
+        return result.reply;
+    }
     if (result.state === 'unavailable' || result.state === 'uncertain' && (command === '/dns' || command === '/tj')) {
         return backup();
     }

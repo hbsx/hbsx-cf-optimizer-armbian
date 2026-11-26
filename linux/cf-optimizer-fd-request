@@ -1,0 +1,15 @@
+#!/bin/bash
+# Fixed action only; never read commands or arguments from the request file.
+set -euo pipefail
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+[[ $EUID == 0 ]] || exit 1
+directory=/run/cf-optimizer-bridge
+request="$directory/fdscan.request"
+[[ -d "$directory" && ! -L "$directory" ]] || exit 0
+[[ -e "$request" || -L "$request" ]] || exit 0
+if [[ -L "$request" || ! -f "$request" ]]; then
+    rm -f -- "$request"
+    exit 1
+fi
+rm -f -- "$request"
+exec /usr/bin/systemctl start --no-block cf-optimizer-proxy.service

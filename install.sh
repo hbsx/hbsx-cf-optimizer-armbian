@@ -13,7 +13,7 @@ test -f "$src/tools/install_platform.py" || { echo 'Missing source: tools/instal
 machine=$(uname -m)
 cfst_arch=$(python3 "$src/tools/install_platform.py" "$machine")
 cfst_dir="cfst_linux_${cfst_arch}"
-for file in cf_dns_bridge.py cf_dns_bridge.sh proxy_control.py cf-optimizer-bridge.service; do
+for file in cf_dns_bridge.py cf_dns_bridge.sh proxy_control.py manual_proxy_scan.py cf-optimizer-bridge.service cf-optimizer-fd-request cf-optimizer-fd-request.path cf-optimizer-fd-request.service; do
     test -f "$src/linux/$file" || { echo "Missing source: linux/$file" >&2; exit 1; }
 done
 printf 'Detected architecture: %s; cfst platform: %s\n' "$machine" "$cfst_arch"
@@ -35,6 +35,7 @@ systemctl stop cf-optimizer-health.service 2>/dev/null || true
 systemctl stop cf-optimizer-proxy.service 2>/dev/null || true
 systemctl stop cf-optimizer-bot.service 2>/dev/null || true
 systemctl stop cf-optimizer-bridge.service 2>/dev/null || true
+systemctl stop cf-optimizer-fd-request.path cf-optimizer-fd-request.service 2>/dev/null || true
 getent passwd cfoptimizer >/dev/null || useradd --system --home-dir /run/cf-optimizer --shell /usr/sbin/nologin cfoptimizer
 install -d -o root -g cfoptimizer -m 750 "$dst"
 if [[ -f "$tmp/$cfst_dir/cfst" ]]; then
@@ -53,8 +54,12 @@ if [[ -f "$src/linux/proxy-cidrs.csv" && ! -f "$dst/proxy-cidrs.csv" ]]; then
     install -o root -g cfoptimizer -m 640 "$src/linux/proxy-cidrs.csv" "$dst/proxy-cidrs.csv"
 fi
 install -o root -g cfoptimizer -m 640 "$src/ip.txt" "$dst/ip.txt"
-for file in cf_dns_bridge.py cf_dns_bridge.sh proxy_control.py; do
+for file in cf_dns_bridge.py cf_dns_bridge.sh proxy_control.py manual_proxy_scan.py; do
     install -o root -g cfoptimizer -m 640 "$src/linux/$file" "$dst/$file"
+done
+install -o root -g root -m 755 "$src/linux/cf-optimizer-fd-request" /usr/local/sbin/cf-optimizer-fd-request
+for file in cf-optimizer-fd-request.path cf-optimizer-fd-request.service; do
+    install -o root -g root -m 644 "$src/linux/$file" "/etc/systemd/system/$file"
 done
 if [[ ! -f "$dst/env.sh" ]]; then
     install -o cfoptimizer -g cfoptimizer -m 600 "$src/linux/env.linux.sh.example" "$dst/env.sh"
@@ -77,7 +82,7 @@ install -o root -g root -m 644 "$src/linux/cf-optimizer-bot.service" /etc/system
 install -o root -g root -m 644 "$src/linux/cf-optimizer-bridge.service" /etc/systemd/system/cf-optimizer-bridge.service
 install -o root -g root -m 644 "$src/linux/cf-optimizer-tmpfiles.conf" /etc/tmpfiles.d/cf-optimizer.conf
 systemd-tmpfiles --create /etc/tmpfiles.d/cf-optimizer.conf
-systemd-analyze verify /etc/systemd/system/cf-optimizer.service /etc/systemd/system/cf-optimizer.timer /etc/systemd/system/cf-optimizer-health.service /etc/systemd/system/cf-optimizer-health.timer /etc/systemd/system/cf-optimizer-proxy.service /etc/systemd/system/cf-optimizer-bot.service /etc/systemd/system/cf-optimizer-bridge.service
+systemd-analyze verify /etc/systemd/system/cf-optimizer.service /etc/systemd/system/cf-optimizer.timer /etc/systemd/system/cf-optimizer-health.service /etc/systemd/system/cf-optimizer-health.timer /etc/systemd/system/cf-optimizer-proxy.service /etc/systemd/system/cf-optimizer-bot.service /etc/systemd/system/cf-optimizer-bridge.service /etc/systemd/system/cf-optimizer-fd-request.path /etc/systemd/system/cf-optimizer-fd-request.service
 systemctl daemon-reload
 cf-optimizer --check
 systemctl enable cf-optimizer.timer
@@ -93,10 +98,13 @@ bridge_enabled=$(runuser -u cfoptimizer -- /bin/bash -c 'source "$1"; printf "%s
 if [[ "$bridge_enabled" == 1 ]]; then
     systemctl disable --now cf-optimizer-bot.service 2>/dev/null || true
     systemctl enable --now cf-optimizer-bridge.service
+    systemctl enable --now cf-optimizer-fd-request.path
 elif [[ "$bot_enabled" == 1 ]]; then
+    systemctl disable --now cf-optimizer-fd-request.path 2>/dev/null || true
     systemctl disable --now cf-optimizer-bridge.service 2>/dev/null || true
     systemctl enable --now cf-optimizer-bot.service
 else
+    systemctl disable --now cf-optimizer-fd-request.path 2>/dev/null || true
     systemctl disable cf-optimizer-bot.service 2>/dev/null || true
     systemctl disable cf-optimizer-bridge.service 2>/dev/null || true
 fi

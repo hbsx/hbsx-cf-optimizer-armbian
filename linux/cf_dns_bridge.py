@@ -59,7 +59,7 @@ def accepted_job(job, settings, seen, now=None):
             or not now < job['expires_at'] <= job['created_at'] + 120):
         return False
     command = job.get('command')
-    if command in ('/dns', '/usecf', '/usefd', '/use4', '/use6'):
+    if command in ('/dns', '/usecf', '/usefd', '/use4', '/use6', '/fd443', '/fd8443', '/fdscan'):
         return True
     if isinstance(command, str) and len(command) <= 64:
         try:
@@ -81,7 +81,7 @@ def accepted_job(job, settings, seen, now=None):
 def snapshot_payload(settings, now=None):
     """Publish only already-measured winners; never probe or write result files."""
     now = time.time() if now is None else now
-    result = dict(cf4=None, cf6=None, fd=None)
+    result = dict(cf4=None, cf6=None, fd=None, fd8443=None)
     for key, name, family in [('cf4', 'best-ips.txt', 4), ('cf6', 'best-ips-v6.txt', 6)]:
         try:
             path = settings.runtime / name
@@ -96,13 +96,16 @@ def snapshot_payload(settings, now=None):
             result[key] = dict(ip=str(address), generated_at=dt.datetime.fromtimestamp(stamp, dt.timezone.utc).isoformat())
         except (OSError, ValueError, control.Problem):
             pass
-    try:
-        _, port, config = proxy_control.configuration(settings)
-        rows, stamp = proxy_control.snapshot(config, port, dt.datetime.fromtimestamp(now, dt.timezone.utc))
-        if rows:
-            result['fd'] = dict(ip=rows[0]['ip'], port=port, generated_at=stamp)
-    except (OSError, ValueError, control.Problem, dns_update.DNSProblem):
-        pass
+    for key, expected_port in [('fd', 443), ('fd8443', 8443)]:
+        try:
+            _, port, config = proxy_control.configuration(settings, expected_port)
+            if port != expected_port:
+                continue
+            rows, stamp = proxy_control.snapshot(config, port, dt.datetime.fromtimestamp(now, dt.timezone.utc))
+            if rows:
+                result[key] = dict(ip=rows[0]['ip'], port=port, generated_at=stamp)
+        except (OSError, ValueError, control.Problem, dns_update.DNSProblem):
+            pass
     return result
 
 
@@ -121,20 +124,29 @@ def execute_job(job, settings):
 
     try:
         command = job['command']
+        if command == '/fdscan':
+            import manual_proxy_scan
+            return manual_proxy_scan.request_scan(job['expires_at']) + '\n线路：N1。', 'ok'
         client = JobDNS(*settings.dns)
         if command in ('/dns', '/tj'):
             lines = []
             if command == '/dns':
                 rows = client.records()
                 lines.append('CF · ' + client.name + '\n' + ('\n'.join(r['type'] + ' ' + r['content'] for r in rows) or '暂无地址记录。'))
-            dns, port, _ = proxy_control.configuration(settings)
-            fd = JobDNS(*dns)
-            rows = fd.records()
-            lines.append('FD· ' + fd.name + '\n' + ('\n'.join(r['type'] + ' ' + r['content'] for r in rows) or '暂无地址记录。') + '\n端口：' + str(port))
+            for target_port in (443, 8443):
+                try:
+                    dns, port, _ = proxy_control.configuration(settings, target_port)
+                    fd = JobDNS(*dns)
+                    rows = fd.records()
+                    lines.append('FD {} · '.format(port) + fd.name + '\n' + ('\n'.join(r['type'] + ' ' + r['content'] for r in rows) or '暂无地址记录。'))
+                except control.Problem as error:
+                    lines.append('FD {}：{}'.format(target_port, error))
             reply = '\n\n'.join(lines)
-        elif command == '/usefd' or command.startswith(('/usetj', '/settj')):
-            dns, _, _ = proxy_control.configuration(settings)
-            reply = proxy_control.handle('/usetj' if command == '/usefd' else command, settings, client=JobDNS(*dns))
+        elif command in ('/usefd', '/fd443', '/fd8443') or command.startswith(('/usetj', '/settj')):
+            target_port = 8443 if command == '/fd8443' else 443 if command in ('/fd443', '/usefd') else None
+            dns, _, _ = proxy_control.configuration(settings, target_port) if target_port else proxy_control.configuration(settings)
+            mapped = '/fd443' if command == '/usefd' else command
+            reply = proxy_control.handle(mapped, settings, client=JobDNS(*dns))
         else:
             reply = control.handle('/use4' if command == '/usecf' else command, settings, client)
         return reply + '\n线路：N1。', 'uncertain' if attempted and reply.startswith('⚠️') else 'ok'

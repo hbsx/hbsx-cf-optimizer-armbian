@@ -12,7 +12,7 @@ class Reply extends EventEmitter {
 }
 
 async function main() {
-    assert.deepEqual(DNS_MENU.map(row => row.command), ['dns', 'usecf', 'usefd', 'use6']);
+    assert.deepEqual(DNS_MENU.map(row => row.command), ['dns', 'usecf', 'fd443', 'fd8443', 'use6', 'fdscan']);
     assert.equal(normalizeDnsCommand('2606:4700:ff00::1'), '/set 2606:4700:ff00::1');
     assert.equal(normalizeDnsCommand('/set 172.64.229.194'), '/set 172.64.229.194');
     assert.equal(normalizeDnsCommand('/dns@example_bot'), '/dns');
@@ -125,7 +125,7 @@ async function main() {
         process.env.CF_PROXY_RESCUE_ENABLED = '1';process.env.CF_PROXY_RESCUE_NAME = 'tj.example.com';
         process.env.CF_PROXY_RESCUE_IPS = '39.105.108.60';
         await handleCfDnsMessage({ ...msg, text: '/rescuetj' });
-        assert.match(replies.pop()!, /FD · tj.example.com/);
+        assert.match(replies.pop()!, /FD 443 · tj.example.com/);
         let release!: () => void; let started!: () => void;
         const requestStarted = new Promise<void>(resolve => { started = resolve; });
         const wait = new Promise<void>(resolve => { release = resolve; });

@@ -1,13 +1,17 @@
 import { isIP } from 'node:net';
 import { CloudflareRescue, rescueSwitch, RescueProblem } from './cfDnsRescue.js';
 
-export function proxyRescueConfiguration(env: NodeJS.ProcessEnv = process.env) {
-    const name = (env.CF_PROXY_RESCUE_NAME || '').toLowerCase().replace(/\.$/, '');
+export function proxyRescueConfiguration(env: NodeJS.ProcessEnv = process.env, requestedPort?: 443 | 8443) {
+    const legacyPort = env.CF_PROXY_RESCUE_PORT || '443';
+    const port = requestedPort === undefined ? legacyPort : String(requestedPort);
+    const name = (env[`CF_PROXY_RESCUE_${port}_NAME`] || (port === legacyPort ? env.CF_PROXY_RESCUE_NAME : '') || '').toLowerCase().replace(/\.$/, '');
     const original = (env.CF_DNS_RESCUE_NAME || '').toLowerCase().replace(/\.$/, '');
-    const port = env.CF_PROXY_RESCUE_PORT || '443';
-    const ips = [...new Set((env.CF_PROXY_RESCUE_IPS || '').split(',').map(x => x.trim()).filter(Boolean))];
+    const ips = [...new Set((env[`CF_PROXY_RESCUE_${port}_IPS`] || (port === legacyPort ? env.CF_PROXY_RESCUE_IPS : '') || '').split(',').map(x => x.trim()).filter(Boolean))];
+    const otherPort = port === '443' ? '8443' : '443';
+    const otherName = (env[`CF_PROXY_RESCUE_${otherPort}_NAME`] || (legacyPort === otherPort ? env.CF_PROXY_RESCUE_NAME : '') || '').toLowerCase().replace(/\.$/, '');
     if (env.CF_PROXY_RESCUE_ENABLED !== '1' || !name || name === original || !original
-        || !/^[1-9][0-9]{0,4}$/.test(port) || Number(port) > 65535 || !ips.length || ips.length > 30
+        || name === otherName || !/^[1-9][0-9]{0,4}$/.test(port) || Number(port) > 65535
+        || [80,8080,8880,2052,2082,2086,2095].includes(Number(port)) || !ips.length || ips.length > 30
         || ips.some(ip => isIP(ip) !== 4)) {
         throw new RescueProblem('甲骨文反代备用入口尚未正确配置，未修改 DNS。');
     }

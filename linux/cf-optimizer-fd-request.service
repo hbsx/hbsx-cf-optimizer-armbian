@@ -1,0 +1,20 @@
+[Unit]
+Description=Dispatch the fixed manual FD selection action
+After=cf-optimizer-bridge.service
+
+[Service]
+Type=oneshot
+Group=cfoptimizer
+ExecStart=/usr/local/sbin/cf-optimizer-fd-request
+StandardOutput=null
+StandardError=null
+LogLevelMax=0
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/run/cf-optimizer-bridge
+NoNewPrivileges=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX
+MemoryMax=16M
+MemorySwapMax=0
+LimitCORE=0
