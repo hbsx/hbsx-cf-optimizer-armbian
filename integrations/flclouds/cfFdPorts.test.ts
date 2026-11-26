@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { normalizeDnsCommand } from './cfDnsBridge.js';
 import { CandidateCache, oracleDnsCommand, runPreferred } from './cfDnsUnified.js';
 import { proxyRescueConfiguration } from './cfProxyRescue.js';
+import { parseFdCommand } from './cfFdCommand.js';
 
 async function main() {
     const env = { CF_DNS_RESCUE_ENABLED:'1',CF_DNS_RESCUE_NAME:'bj.example.com',
@@ -14,6 +15,15 @@ async function main() {
         assert.equal(normalizeDnsCommand(cmd),'/'+cmd);
         assert.equal(normalizeDnsCommand('/'+cmd+'@OriginalBot'),'/'+cmd);
         assert.equal(normalizeDnsCommand('/'+cmd+' unexpected'),'/invalid');
+    }
+    for(const prefix of ['/fd8443','/FD8443@OriginalBot','fd8443']) {
+        assert.equal(normalizeDnsCommand(prefix+' 82.110.234.167:8443'),'/fd8443 82.110.234.167');
+    }
+    assert.deepEqual(parseFdCommand('/fd443 82.110.234.167:443'),{port:443,ip:'82.110.234.167'});
+    for(const value of ['127.0.0.1','192.168.1.160','169.254.169.254','100.64.0.1','224.0.0.1',
+        '192.0.0.9','198.18.0.1','203.0.113.1','255.255.255.255','::1','example.com',
+        '82.110.234.167:443','82.110.234.167:80','82.110.234.167 extra']) {
+        assert.equal(normalizeDnsCommand('/fd8443 '+value),'/invalid',value);
     }
     assert.equal(proxyRescueConfiguration(env,443).client.name,'tj.example.com');
     assert.equal(proxyRescueConfiguration(env,8443).client.name,'nj.example.com');
@@ -61,7 +71,13 @@ async function main() {
         await oracleDnsCommand('/fd443',cache);
         assert.equal(writes,2);assert.equal(records['tj.example.com'][0].content,'39.105.108.60');
         assert.equal(records['nj.example.com'][0].content,'166.88.14.71');
-        assert.match(await oracleDnsCommand('/fdscan',cache),/N1/);assert.equal(writes,2);
+        const manual=await oracleDnsCommand('/fd8443 82.110.234.167',cache);
+        assert.equal(writes,3);assert.equal(records['nj.example.com'][0].content,'82.110.234.167');
+        assert.equal(records['tj.example.com'][0].content,'39.105.108.60');
+        assert.match(manual,/未测速/);
+        assert.equal(cache.get('fd8443').ip,'166.88.14.71');
+        await assert.rejects(oracleDnsCommand('/fd8443 192.168.1.160',cache));
+        assert.match(await oracleDnsCommand('/fdscan',cache),/N1/);assert.equal(writes,3);
     } finally {globalThis.fetch=original;}
     let reads=0,backups=0;
     const normal=async()=>({state:'uncertain' as const,reply:'unknown'});

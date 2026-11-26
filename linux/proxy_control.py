@@ -14,7 +14,34 @@ import dns_update
 import proxy_scan
 import telegram_control as control
 
-USAGE = '/tj 查询反代 DNS 和候选\n/usetj [HKG|NRT|SIN] [名次] 切换优选\n/settj IPv4 指定本机允许列表内的反代 IP'
+USAGE = '/fd443 [IPv4或IPv4:443] 更新 tj\n/fd8443 [IPv4或IPv4:8443] 更新 nj\n不带 IP 使用同端口优选第一名；自定义 IP 仅做公开 TLS 检查。\n/tj 查询；/usetj [地区] [名次]；/settj IPv4 使用已授权地址'
+
+
+def custom_address(value):
+    try:
+        address = ipaddress.IPv4Address(value)
+        blocked = ('192.0.0.0/24', '192.88.99.0/24')
+        if (not address.is_global or address.is_multicast
+                or any(address in ipaddress.ip_network(net) for net in blocked)):
+            raise ValueError()
+        return address
+    except ValueError:
+        raise control.Problem('FD 自定义地址须为公网 IPv4，不接受内网、保留地址或域名。') from None
+
+
+def parse_fd(text):
+    words = text.strip().split()
+    if not words or words[0] not in ('/fd443', '/fd8443'):
+        return None
+    if len(words) > 2:
+        raise control.Problem(USAGE)
+    port = int(words[0][3:])
+    if len(words) == 1:
+        return port, None
+    parts = words[1].split(':')
+    if len(parts) > 2 or len(parts) == 2 and parts[1] != str(port):
+        raise control.Problem('IP 后的端口必须与命令一致。')
+    return port, str(custom_address(parts[0]))
 
 
 def parse(text):
@@ -121,11 +148,26 @@ def verify(row, config):
         raise control.Problem('反代验证失败或接口限流，保留原记录。') from None
 
 
-def handle(text, settings, client=None, probe=None, sleep=None, lock=None):
+def verify_custom(row, config):
+    """A custom command never discloses a private Host/path to a new endpoint."""
+    try:
+        config.check_runtime()
+        result = proxy_scan.Prober(config).probe(row)
+        if (not result.get('ok') or result.get('colo') not in proxy_scan.COLOS
+                or row['colo'] and result['colo'] != row['colo']):
+            raise control.Problem('自定义 FD 未通过亚太 CF / TLS 检查，保留原记录。')
+        return result
+    except proxy_scan.Problem:
+        raise control.Problem('自定义 FD 公开验证失败或接口限流，保留原记录。') from None
+
+
+def handle(text, settings, client=None, probe=None, sleep=None, lock=None, public_probe=None):
     target_port = None
-    if text.strip() in ('/fd443', '/fd8443'):
-        target_port = int(text.strip()[3:])
-        text = '/usetj'
+    custom_ip = None
+    fd = parse_fd(text)
+    if fd is not None:
+        target_port, custom_ip = fd
+        text = '/settj ' + custom_ip if custom_ip else '/usetj'
     parsed = parse(text)
     if parsed is None:
         raise control.Problem(USAGE)
@@ -149,7 +191,9 @@ def handle(text, settings, client=None, probe=None, sleep=None, lock=None):
             lines.append(str(e))
         lines.append(USAGE)
         return '\n'.join(lines)
-    if command == '/usetj':
+    if custom_ip:
+        row = dict(ip=custom_ip, port=port, colo='', brand='Manual')
+    elif command == '/usetj':
         rows, _ = snapshot(config, port)
         rows = [r for r in rows if not arg or r['colo'] == arg]
         if rank > len(rows):
@@ -163,6 +207,8 @@ def handle(text, settings, client=None, probe=None, sleep=None, lock=None):
     chosen = copy.copy(settings)
     chosen.colo = row['colo']
     def validator(value):
+        if custom_ip and value == custom_ip:
+            return custom_address(value)
         if value != row['ip'] or (value, port) not in config.allowed_nodes:
             raise control.Problem('反代候选不在允许列表内，未修改。')
         return ipaddress.IPv4Address(value)
@@ -173,9 +219,18 @@ def handle(text, settings, client=None, probe=None, sleep=None, lock=None):
         index = len(rounds) + 1
         old_samples = []
         try:
-            delay = (probe or verify)(row, config)
+            if custom_ip:
+                measured = (public_probe or verify_custom)(row, config)
+                delay = measured['tcp_ms']
+                if (measured.get('colo') not in proxy_scan.COLOS or isinstance(delay, bool)
+                        or not math.isfinite(delay) or delay <= 0
+                        or row['colo'] and measured['colo'] != row['colo']):
+                    raise control.Problem('自定义 FD 公开检查结果无效或机房变化，保留原记录。')
+                row['colo'] = chosen.colo = measured['colo']
+            else:
+                delay = (probe or verify)(row, config)
         except control.Problem:
-            rounds.append('第 {} 轮：新 {}:{} 节点检查失败。'.format(index, row['ip'], port))
+            rounds.append('第 {} 轮：新 {}:{} {}检查失败。'.format(index, row['ip'], port, '公开 TLS ' if custom_ip else '节点'))
             raise
         for record in old_records:
             if record['type'] != 'A':
@@ -192,10 +247,11 @@ def handle(text, settings, client=None, probe=None, sleep=None, lock=None):
             old = '旧最快 {} {:.2f} ms'.format(old_ip, old_delay)
         else:
             old = '旧 IP 未取得有效 TCP 延迟（不通或不在允许列表）'
-        rounds.append('第 {} 轮：{}；新 {} {:.2f} ms；节点检查通过。'.format(
-            index, old, row['ip'], delay))
+        rounds.append('第 {} 轮：{}；新 {} {:.2f} ms；{}检查通过。'.format(
+            index, old, row['ip'], delay, '公开 TLS ' if custom_ip else '节点'))
         return delay
     header = ['DNS 比较：{}（端口 {}）'.format(client.name, port),
+              '规则：手动指定 FD IP，两轮公开 TLS 检查通过后更新；不验证实际节点。' if custom_ip else
               '规则：指定反代 IP，两轮节点检查通过后更新。' if command == '/settj'
               else '规则：本轮同端口下载最快候选，两轮节点检查通过后更新。']
     try:
@@ -203,6 +259,8 @@ def handle(text, settings, client=None, probe=None, sleep=None, lock=None):
                                 sleep=sleep, lock=lock, observe_before=observe_before)
     except control.Problem as error:
         raise control.Problem('\n'.join(header + rounds + [str(error)])) from None
+    if custom_ip:
+        result = result.replace('节点检查', '公开 TLS 检查')
     return '\n'.join(header + rounds + [result.replace('/dns', '/tj'),
                 '客户端端口保持 {} 不变。'.format(port)])
 

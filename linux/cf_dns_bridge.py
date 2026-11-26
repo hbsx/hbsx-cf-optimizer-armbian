@@ -63,6 +63,8 @@ def accepted_job(job, settings, seen, now=None):
         return True
     if isinstance(command, str) and len(command) <= 64:
         try:
+            if proxy_control.parse_fd(command) is not None:
+                return True
             if proxy_control.parse(command) is not None:
                 return True
         except control.Problem:
@@ -142,8 +144,9 @@ def execute_job(job, settings):
                 except control.Problem as error:
                     lines.append('FD {}：{}'.format(target_port, error))
             reply = '\n\n'.join(lines)
-        elif command in ('/usefd', '/fd443', '/fd8443') or command.startswith(('/usetj', '/settj')):
-            target_port = 8443 if command == '/fd8443' else 443 if command in ('/fd443', '/usefd') else None
+        elif command == '/usefd' or proxy_control.parse_fd(command) is not None or command.startswith(('/usetj', '/settj')):
+            fd = proxy_control.parse_fd(command)
+            target_port = fd[0] if fd else 443 if command == '/usefd' else None
             dns, _, _ = proxy_control.configuration(settings, target_port) if target_port else proxy_control.configuration(settings)
             mapped = '/fd443' if command == '/usefd' else command
             reply = proxy_control.handle(mapped, settings, client=JobDNS(*dns))

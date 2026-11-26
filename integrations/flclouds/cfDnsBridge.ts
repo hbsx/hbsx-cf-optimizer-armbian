@@ -3,20 +3,21 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { isIP } from 'node:net';
 import { RescueProblem } from './cfDnsRescue.js';
 import { CandidateCache, oracleDnsCommand, runPreferred, type N1Result } from './cfDnsUnified.js';
+import { parseFdCommand } from './cfFdCommand.js';
 
 type Job = { id: string; command: string; sender_id: number; chat_id: number; created_at: number; expires_at: number };
 type Pending = { job: Job; claimed: boolean; finish: (reply: N1Result) => void; timer: NodeJS.Timeout };
 export const DNS_MENU = [
     { command: 'dns', description: '查看 bj、tj、nj 当前 IP' },
     { command: 'usecf', description: '使用 N1 的 CF IPv4 优选第一名' },
-    { command: 'fd443', description: 'FD 443 第一名更新 tj 域名' },
-    { command: 'fd8443', description: 'FD 8443 第一名更新 nj 域名' },
+    { command: 'fd443', description: 'FD 443 更新 tj；可加自定义 IP' },
+    { command: 'fd8443', description: 'FD 8443 更新 nj；可加自定义 IP' },
     { command: 'use6', description: '使用 N1 的 CF IPv6 优选第一名' },
     { command: 'fdscan', description: '手动启动 N1 的 FD 优选并推送' },
 ];
 
 export function normalizeDnsCommand(text: string): string | null {
-    const input = text.trim();
+    const input = text.trim().replace(/^(fd443|fd8443|fdscan)(?=\s|$)/i, '/$1');
     if (isIP(input) && !input.includes('%')) return `/set ${input}`;
     if (/^(fd443|fd8443|fdscan)$/i.test(input)) return `/${input.toLowerCase()}`;
     const match = input.match(/^\/(dns|set|usecf|usefd|use4|use6|rescue|tj|usetj|settj|rescuetj|fd443|fd8443|fdscan)(?:@\w+)?(?:\s+([\s\S]*))?$/i);
@@ -26,6 +27,12 @@ export function normalizeDnsCommand(text: string): string | null {
     if (name === 'rescuetj') name = args ? 'settj' : 'tj';
     if (name === 'rescue') name = args ? 'set' : 'dns';
     if (name === 'use4') name = 'usecf';
+    if (name === 'fd443' || name === 'fd8443') {
+        try {
+            const parsed = parseFdCommand(`/${name}${args ? ' ' + args : ''}`);
+            return parsed ? `/${name}${parsed.ip ? ' ' + parsed.ip : ''}` : '/invalid';
+        } catch { return '/invalid'; }
+    }
     if (name === 'settj') return isIP(args) === 4 ? `/settj ${args}` : '/invalid';
     if (name === 'usetj') {
         if (!args) return '/usefd';
@@ -180,7 +187,7 @@ type Message = { text: string; senderId: number; chatId: string; isPrivate: bool
 
 export async function handleCfDnsMessage(message: Message): Promise<boolean> {
     if (!configured()) return false;
-    if (!message.allowBareIp && (isIP(message.text.trim()) || /^(fd443|fd8443|fdscan)$/i.test(message.text.trim()))) return false;
+    if (!message.allowBareIp && (isIP(message.text.trim()) || /^(fd443|fd8443|fdscan)(?:\s|$)/i.test(message.text.trim()))) return false;
     const command = normalizeDnsCommand(message.text);
     if (command === null) return false; // Preserve all existing command dispatch.
     if (String(message.senderId) !== process.env.CF_DNS_OWNER_ID || !message.isPrivate
@@ -195,7 +202,7 @@ export async function handleCfDnsMessage(message: Message): Promise<boolean> {
         return true;
     }
     if (command === '/invalid') {
-        await message.reply('/dns 查看 bj、tj、nj；/fd443 更新 tj；/fd8443 更新 nj；/fdscan 手动启动 FD 优选；/usecf、/use6 切换 CF。更新默认 N1，不通时用甲骨文；测速只在 N1。');
+        await message.reply('/dns 查看 bj、tj、nj；/fd443 [IP或IP:443] 更新 tj；/fd8443 [IP或IP:8443] 更新 nj；不带 IP 使用优选第一名。/fdscan 手动 FD 优选；/usecf、/use6 切换 CF。默认 N1，离线时用甲骨文；测速只在 N1。');
         return true;
     }
     if (controllerBusy || queue.busy()) {

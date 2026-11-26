@@ -129,6 +129,49 @@ class ProxyControlTests(unittest.TestCase):
         probe.assert_not_called();self.assertFalse(c.writes)
         self.assertIn('已切换', self.call('/settj 39.105.108.60'))
 
+    def test_custom_8443_changes_only_its_domain_without_enlarging_allowlist(self):
+        client=Client();client.name='nj.example.com'
+        for record in client.rows:record['name']=client.name
+        allowed=self.config.allowed_nodes
+        public=Mock(return_value=dict(ok=True,colo='NRT',tcp_ms=30))
+        private=Mock()
+        with patch.object(pc,'configuration',return_value=(('token','zone',client.name),8443,self.config)):
+            result=pc.handle('/fd8443 82.110.234.167:8443',self.settings,client=client,probe=private,
+                             public_probe=public,sleep=lambda _:None,lock=contextlib.nullcontext)
+        self.assertEqual(client.rows[0]['content'],'82.110.234.167')
+        self.assertEqual(public.call_count,2);private.assert_not_called()
+        self.assertEqual(self.config.allowed_nodes,allowed)
+        self.assertTrue(all(c.args[0]['port']==8443 for c in public.call_args_list))
+        self.assertIn('不验证实际节点',result);self.assertIn('公开 TLS 检查通过',result)
+
+    def test_custom_invalid_address_or_wrong_port_never_reads_dns(self):
+        for value in ['127.0.0.1','192.168.1.160','169.254.169.254','100.64.0.1','224.0.0.1',
+                      '192.0.0.9','198.18.0.1','203.0.113.1','255.255.255.255','::1',
+                      'example.com','82.110.234.167:443','82.110.234.167:80','82.110.234.167 extra']:
+            client=Mock()
+            with self.subTest(value=value),self.assertRaises(control.Problem):
+                self.call('/fd8443 '+value,client)
+            client.records.assert_not_called();client.request.assert_not_called()
+
+    def test_custom_second_round_failure_or_colo_change_never_writes(self):
+        for second in [control.Problem('failed'),dict(colo='LAX',tcp_ms=10),dict(colo='SIN',tcp_ms=10)]:
+            client=Client()
+            public=Mock(side_effect=[dict(colo='NRT',tcp_ms=20),second])
+            with self.subTest(second=second),self.assertRaises(control.Problem):
+                pc.handle('/fd443 82.110.234.167',self.settings,client=client,public_probe=public,
+                          sleep=lambda _:None,lock=contextlib.nullcontext)
+            self.assertFalse(client.writes)
+
+    def test_custom_public_probe_never_uses_private_node_data(self):
+        prober=Mock();prober.probe.return_value=dict(ok=True,colo='NRT',tcp_ms=20)
+        row=dict(ip='82.110.234.167',port=8443,colo='')
+        with patch.object(pc.proxy_scan,'Prober',return_value=prober):
+            self.assertEqual(pc.verify_custom(row,self.config)['colo'],'NRT')
+        prober.probe.assert_called_once_with(row)
+        prober.probe.return_value=dict(ok=False,colo='NRT')
+        with patch.object(pc.proxy_scan,'Prober',return_value=prober),self.assertRaises(control.Problem):
+            pc.verify_custom(row,self.config)
+
     def test_stale_unverified_snapshot_and_absent_rank_refuse_writes(self):
         for change in [dict(generated_at='2020-01-01T00:00:00+00:00'),dict(node_verified=False),
                        dict(generated_at='2099-01-01T00:00:00+00:00')]:

@@ -1,6 +1,7 @@
 import { isIP } from 'node:net';
 import { CloudflareRescue, rescueCandidate, rescueSwitch, RescueProblem } from './cfDnsRescue.js';
 import { proxyRescueConfiguration } from './cfProxyRescue.js';
+import { customFdAddress, parseFdCommand } from './cfFdCommand.js';
 
 export type N1Result = { state: 'ok' | 'unavailable' | 'failed' | 'uncertain' | 'busy'; reply: string };
 type Slot = 'cf4' | 'cf6' | 'fd' | 'fd8443';
@@ -69,20 +70,25 @@ export async function oracleDnsCommand(command: string, cache: CandidateCache): 
         }));
         return replies.join('\n\n') + '\n线路：甲骨文（自动备用）。';
     }
+    const fd = parseFdCommand(command);
     let address: string, timestamp = '';
-    if (command === '/usecf' || command === '/use6' || command === '/usefd' || command === '/fd443' || command === '/fd8443') {
+    if (fd?.ip) {
+        address = fd.ip;
+    } else if (command === '/usecf' || command === '/use6' || command === '/usefd' || command === '/fd443' || command === '/fd8443') {
         const row = cache.get(command === '/usecf' ? 'cf4' : command === '/use6' ? 'cf6' : command === '/fd8443' ? 'fd8443' : 'fd');
         address = row.ip; timestamp = `\nN1 优选时间：${row.generated_at}`;
     } else if (command.startsWith('/set ') || command.startsWith('/settj ')) {
         address = command.split(' ')[1];
     } else throw new RescueProblem('备用切换请使用 /usecf、/usefd 或 /use6。');
-    if (command === '/usefd' || command === '/fd443' || command === '/fd8443' || command.startsWith('/settj ')) {
-        const { client, ips, port } = proxyRescueConfiguration(process.env, command === '/fd8443' ? 8443 : 443);
+    if (command === '/usefd' || fd || command.startsWith('/settj ')) {
+        const { client, ips, port } = proxyRescueConfiguration(process.env, fd?.port || 443);
         const validate = (value: string) => {
+            if (fd?.ip && value === fd.ip) return customFdAddress(value);
             if (isIP(value) !== 4 || !ips.includes(value)) throw new RescueProblem('反代 IP 不在备用允许列表中，DNS 未修改。');
             return value;
         };
-        return await rescueSwitch(address, client, validate, '/dns') + timestamp + `\nFD 端口：${port}（保持不变）。`;
+        return await rescueSwitch(address, client, validate, '/dns') + timestamp + `\nFD 端口：${port}（保持不变）。`
+            + (fd?.ip ? '\n手动指定地址；甲骨文仅更改 DNS，未测速、未验证家庭线路或实际节点。' : '');
     }
     return await rescueSwitch(address, new CloudflareRescue(), rescueCandidate, '/dns') + timestamp;
 }

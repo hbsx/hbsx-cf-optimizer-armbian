@@ -109,6 +109,7 @@ async function main() {
     assert.match(replies.pop()!, /转发/);
     assert.equal(await handleCfDnsMessage({ ...msg, text: '/help' }), false);
     assert.equal(await handleCfDnsMessage({ ...msg, text: '1.1.1.1', allowBareIp: false }), false);
+    assert.equal(await handleCfDnsMessage({ ...msg, text: 'fd8443 82.110.234.167', allowBareIp: false }), false);
     for (const change of [{ senderId: 1 }, { isPrivate: false }, { forwarded: true }, { date: Date.now() / 1000 - 121 }]) {
         const before = replies.length;
         await handleCfDnsMessage({ ...msg, text: '/rescue 2606:4700::1', ...change });

@@ -6,8 +6,8 @@
 | --- | --- |
 | `/dns` | 同时查看 CF、FD 443、FD 8443 三个域名当前的 A/AAAA IP |
 | `/usecf` | 使用 N1 最近 CF IPv4 优选第一名 |
-| `/fd443` | 使用 N1 最近 FD 443 第一名更新 443 对应域名 |
-| `/fd8443` | 使用 N1 最近 FD 8443 第一名更新 8443 对应域名 |
+| `/fd443 [IP或IP:443]` | 不带 IP 使用 FD 443 第一名；带 IP 手动更新 tj 对应域名 |
+| `/fd8443 [IP或IP:8443]` | 不带 IP 使用 FD 8443 第一名；带 IP 手动更新 nj 对应域名 |
 | `/use6` | 使用 N1 最近 CF IPv6 优选第一名 |
 | `/fdscan` | 手动启动 N1 FD 优选，完成后走原机器人推送 |
 
@@ -21,11 +21,15 @@ N1 worker 每约 45–60 秒把已经测出的 CF4、CF6、FD 443、FD 8443 第�
 
 `fd443`、`fd8443`、`fdscan` 支持不带斜杠；`/usefd` 仍兼容 443 更新。手动优选只由 N1 执行，离线时不会交给甲骨文测速或伪造启动成功。启动结果不明时不重复提交。
 
+自定义示例：`/fd8443 82.110.234.167:8443`，或 `/fd443 39.105.24.90`。只接受公网 IPv4；带端口时必须与命令一致。443、8443 分别绑定既有域名，DNS 不会保存端口。裸 IP 仍按 CF 处理，不能用于指定 FD。
+
+**自定义更新不要求进入优选池，也不扩大任何长期允许列表。** N1 在线时，在同一运行锁内完成两轮公开 CF/TLS 检查，要求亚太机房且两轮机房一致，再更换 DNS；不向新地址发送原节点 Host、WS 路径或凭据，不验证实际节点或下载速度，回复明确标注。公开验证失败时保留 DNS，不绕到甲骨文强行更新。甲骨文备用仅将本条管理员明确指定的公网 IPv4 写入对应 DNS，不进行测速或节点验证，并在回复中说明。自定义地址不写入候选池、不污染第一名缓存，不保留指令历史；后续自动优选仍可能按原规则替换它。
+
 旧 `/use4`、`/usetj`、`/rescue`、`/rescuetj` 隐藏兼容，不再强制选择线路。裸 IP 和 `/set IP` 仍指定 CF 地址；`/settj IPv4` 仍指定已授权 FD 地址，均自动选择线路。按地区、名次的旧 `/usetj` 仅在 N1 在线时支持，不显示在简化菜单中。
 
 ## 接入配置
 
-将 `cfDnsBridge.ts`、`cfDnsUnified.ts`、`cfDnsRescue.ts`、`cfProxyRescue.ts` 放入 FlClouds 的 `backend/src/services/`，应用 `existing-bot.patch`。其他版本须检查补丁上下文；已经接入的版本更新模块和帮助文字，不重复应用补丁。
+将 `cfDnsBridge.ts`、`cfDnsUnified.ts`、`cfDnsRescue.ts`、`cfProxyRescue.ts`、`cfFdCommand.ts` 放入 FlClouds 的 `backend/src/services/`，应用 `existing-bot.patch`。其他版本须检查补丁上下文；已经接入的版本更新模块和帮助文字，不重复应用补丁。
 
 FlClouds 私有环境和 Compose backend.environment 传入：
 
