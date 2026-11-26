@@ -172,6 +172,40 @@ class ProxyControlTests(unittest.TestCase):
         with patch.object(pc.proxy_scan,'Prober',return_value=prober),self.assertRaises(control.Problem):
             pc.verify_custom(row,self.config)
 
+    def test_fdcheck_detects_ports_without_dns_or_private_node_calls(self):
+        def public(row,config):
+            if row['port']==443:raise control.Problem('closed')
+            return dict(colo='NRT',tcp_ms=20)
+        with patch.object(control,'ControlDNS') as dns:
+            reply=pc.check_fd('/fdcheck 82.110.234.167',self.settings,public_probe=public,
+                              lock=contextlib.nullcontext,sleep=lambda _:None)
+        dns.assert_not_called()
+        self.assertIn('443：未通过',reply);self.assertIn('8443：两轮',reply)
+        self.assertIn('/fd8443 82.110.234.167:8443',reply);self.assertIn('未修改 DNS',reply)
+
+    def test_wrong_service_port_suggests_alternative_without_changing_dns(self):
+        client=Client();ports=[]
+        def public(row,config):
+            ports.append(row['port'])
+            if row['port']==443:raise control.Problem('closed')
+            return dict(colo='NRT',tcp_ms=20)
+        with self.assertRaises(control.Problem) as error:
+            pc.handle('/fd443 82.110.234.167',self.settings,client=client,public_probe=public,
+                      sleep=lambda _:None,lock=contextlib.nullcontext)
+        self.assertFalse(client.writes);self.assertEqual(ports,[443,8443])
+        self.assertIn('/fd8443 82.110.234.167:8443',str(error.exception))
+
+    def test_rate_limit_never_probes_alternate_port_or_continues_checks(self):
+        public=Mock(side_effect=pc.CheckLimited('limited'))
+        for command in ['/fdcheck 82.110.234.167','/fd443 82.110.234.167']:
+            public.reset_mock();client=Client()
+            with self.subTest(command=command),self.assertRaises(control.Problem):
+                if command.startswith('/fdcheck'):
+                    pc.check_fd(command,self.settings,public_probe=public,lock=contextlib.nullcontext,sleep=lambda _:None)
+                else:
+                    pc.handle(command,self.settings,client=client,public_probe=public,lock=contextlib.nullcontext)
+            self.assertEqual(public.call_count,1);self.assertFalse(client.writes)
+
     def test_stale_unverified_snapshot_and_absent_rank_refuse_writes(self):
         for change in [dict(generated_at='2020-01-01T00:00:00+00:00'),dict(node_verified=False),
                        dict(generated_at='2099-01-01T00:00:00+00:00')]:

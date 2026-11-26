@@ -25,6 +25,10 @@ class BridgeTests(unittest.TestCase):
             with self.subTest(change=change):
                 self.assertFalse(bridge.accepted_job(dict(self.job, **change), self.settings, [], 1050))
         self.assertFalse(bridge.accepted_job(self.job, self.settings, ['a' * 32], 1050))
+        for text in ['/fdcheck 82.110.234.167','/fdcheck 82.110.234.167:8443']:
+            self.assertTrue(bridge.accepted_job(dict(self.job,command=text),self.settings,[],1050))
+        for text in ['/fdcheck','/fdcheck 192.168.1.160','/fdcheck 82.110.234.167:80']:
+            self.assertFalse(bridge.accepted_job(dict(self.job,command=text),self.settings,[],1050))
         # Valid syntax reaches DNS core, including its explicit non-Cloudflare refusal.
         self.assertTrue(bridge.accepted_job(dict(self.job, command='/set 1.1.1.1'), self.settings, [], 1050))
         for text in ('/usecf', '/usefd', '/use6', '/fd443', '/fd8443', '/fd443 82.110.234.167', '/fd8443 82.110.234.167:8443', '/fdscan', '/tj', '/usetj', '/usetj HKG 2', '/usetj 2', '/settj 39.105.24.90'):
@@ -117,6 +121,14 @@ class BridgeTests(unittest.TestCase):
                 patch.object(bridge.control.ControlDNS,'request') as write:
             self.assertEqual(bridge.execute_job(job,self.settings)[1],'failed')
         configuration.assert_called_once_with(self.settings,8443);write.assert_not_called()
+
+    def test_fdcheck_job_never_constructs_a_dns_client(self):
+        job=dict(self.job,command='/fdcheck 82.110.234.167')
+        with patch.object(bridge.proxy_control,'check_fd',return_value='checked') as check, \
+                patch.object(bridge.control,'ControlDNS') as client:
+            reply,state=bridge.execute_job(job,self.settings)
+        self.assertEqual(state,'ok');self.assertIn('checked',reply)
+        check.assert_called_once_with(job['command'],self.settings);client.assert_not_called()
 
     def test_reverse_proxy_cache_uses_existing_sorted_snapshot_and_fixed_port(self):
         settings = SimpleNamespace(runtime=Path('not-present'))

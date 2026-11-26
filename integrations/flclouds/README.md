@@ -1,6 +1,6 @@
 # FlClouds 同机器人 DNS 接入
 
-保留原机器人的上传、下载及其他功能，DNS 菜单提供六项：
+保留原机器人的上传、下载及其他功能，DNS 菜单提供七项：
 
 | 指令 | 功能 |
 | --- | --- |
@@ -8,10 +8,11 @@
 | `/usecf` | 使用 N1 最近 CF IPv4 优选第一名 |
 | `/fd443 [IP或IP:443]` | 不带 IP 使用 FD 443 第一名；带 IP 手动更新 tj 对应域名 |
 | `/fd8443 [IP或IP:8443]` | 不带 IP 使用 FD 8443 第一名；带 IP 手动更新 nj 对应域名 |
+| `/fdcheck IP[:443或8443]` | 只做两轮公开 CF/TLS 端口检查，不更改 DNS；不带端口分别检查两个端口 |
 | `/use6` | 使用 N1 最近 CF IPv6 优选第一名 |
 | `/fdscan` | 手动启动 N1 FD 优选，完成后走原机器人推送 |
 
-**所有测速、地区筛选和节点验证只在 N1 执行。甲骨文不测速，只提供备用 Cloudflare DNS API 线路。**
+**优选、下载测速和实际节点验证只在 N1 执行。甲骨文不参加优选或下载测速；手动 FD 更新时会执行轻量公开 CF/TLS 端口检查，再提供备用 Cloudflare DNS API 线路。**
 
 默认由 N1 处理。N1 离线、8 秒内未领取任务，或明确报告 DNS 请求在写入前失败时，自动使用甲骨文。N1 的节点验证失败、扫描锁占用或结果缺失时，不绕过验证。任务已领取但更新结果不明时，先查询当前 DNS，不重复提交未知结果的更新。任务最长 120 秒，N1 在写入前检查有效期。
 
@@ -23,13 +24,15 @@ N1 worker 每约 45–60 秒把已经测出的 CF4、CF6、FD 443、FD 8443 第�
 
 自定义示例：`/fd8443 82.110.234.167:8443`，或 `/fd443 39.105.24.90`。只接受公网 IPv4；带端口时必须与命令一致。443、8443 分别绑定既有域名，DNS 不会保存端口。裸 IP 仍按 CF 处理，不能用于指定 FD。
 
-**自定义更新不要求进入优选池，也不扩大任何长期允许列表。** N1 在线时，在同一运行锁内完成两轮公开 CF/TLS 检查，要求亚太机房且两轮机房一致，再更换 DNS；不向新地址发送原节点 Host、WS 路径或凭据，不验证实际节点或下载速度，回复明确标注。公开验证失败时保留 DNS，不绕到甲骨文强行更新。甲骨文备用仅将本条管理员明确指定的公网 IPv4 写入对应 DNS，不进行测速或节点验证，并在回复中说明。自定义地址不写入候选池、不污染第一名缓存，不保留指令历史；后续自动优选仍可能按原规则替换它。
+**自定义更新不要求进入优选池，也不扩大任何长期允许列表。** N1 在线时，在同一运行锁内完成两轮公开 CF/TLS 检查，要求亚太机房且两轮机房一致，再更换 DNS；不向新地址发送原节点 Host、WS 路径或凭据，不验证实际节点或下载速度，回复明确标注。公开验证失败时保留 DNS，不绕到甲骨文强行更新。甲骨文备用在手动更新前，也须两轮指定 IP:端口的公开 CF/TLS 检查通过，才将本条管理员明确指定的公网 IPv4 写入对应 DNS。甲骨文仅观测当地网络，不按自己的 CF 机房判断家庭落地地区，回复注明不能代表家中线路，且不做下载测速或实际节点验证。自定义地址不写入候选池、不污染第一名缓存，不保留指令历史；后续自动优选仍可能按原规则替换它。
+
+指定端口检测失败时，可额外检查另一个端口一次，并提示正确命令和对应域名；不会自动改用另一个端口或修改另一域名。HTTP 429 会停止，不再探测另一个端口。`/fdcheck` 与更新使用相同公开检查标准，但只返回检查结果，不访问 DNS 写入接口。N1 使用物理网卡直连，甲骨文检查由甲骨文本机发起；均只请求固定的 `speed.cloudflare.com/cdn-cgi/trace`，验证证书及 Host 响应，限制超时和响应大小，不跟随重定向，不退回明文。端口连通不等于实际节点一定可用，也无法识别一个同样可用但并非用户本意的 IP。
 
 旧 `/use4`、`/usetj`、`/rescue`、`/rescuetj` 隐藏兼容，不再强制选择线路。裸 IP 和 `/set IP` 仍指定 CF 地址；`/settj IPv4` 仍指定已授权 FD 地址，均自动选择线路。按地区、名次的旧 `/usetj` 仅在 N1 在线时支持，不显示在简化菜单中。
 
 ## 接入配置
 
-将 `cfDnsBridge.ts`、`cfDnsUnified.ts`、`cfDnsRescue.ts`、`cfProxyRescue.ts`、`cfFdCommand.ts` 放入 FlClouds 的 `backend/src/services/`，应用 `existing-bot.patch`。其他版本须检查补丁上下文；已经接入的版本更新模块和帮助文字，不重复应用补丁。
+将 `cfDnsBridge.ts`、`cfDnsUnified.ts`、`cfDnsRescue.ts`、`cfProxyRescue.ts`、`cfFdCommand.ts`、`cfFdCheck.ts` 放入 FlClouds 的 `backend/src/services/`，应用 `existing-bot.patch`。其他版本须检查补丁上下文；已经接入的版本更新模块和帮助文字，不重复应用补丁。
 
 FlClouds 私有环境和 Compose backend.environment 传入：
 
@@ -66,7 +69,7 @@ CF_PROXY_DNS_443_NAME=443对应域名（可省略并回退原CF_PROXY_DNS_NAME�
 CF_PROXY_DNS_8443_NAME=独立的8443对应域名
 ```
 
-只有原机器人接收 TG 消息，不新增接收器。只接受指定管理员认证后的新私聊消息，不处理转发、群聊、旧消息或向导中的裸 IP/裸命令。默认语言与中文菜单均保留原功能，并提供上述六条 DNS/优选指令。
+只有原机器人接收 TG 消息，不新增接收器。只接受指定管理员认证后的新私聊消息，不处理转发、群聊、旧消息或向导中的裸 IP/裸命令。默认语言与中文菜单均保留原功能，并提供上述七条 DNS/优选指令。
 
 升级 N1 安装器会安装固定动作的 `cf-optimizer-fd-request.path/service`。worker 只在 `/run/cf-optimizer-bridge` 创建空请求，派发器删除后启动唯一指定的 FD 服务；不读取命令文本，不赋予 worker root 权限或额外 capabilities。请求、状态和报告均在 RAM，沿用既有运行锁、直连测速和代理 TG 推送。
 
@@ -82,6 +85,7 @@ node --import tsx src/services/cfDnsUnified.test.ts
 node --import tsx src/services/cfDnsRescue.test.ts
 node --import tsx src/services/cfProxyRescue.test.ts
 node --import tsx src/services/cfFdPorts.test.ts
+node --import tsx src/services/cfFdCheck.test.ts
 ```
 
 N1 worker 测试在 `python -m unittest discover -s tests` 中，使用模拟客户端，不修改实际 DNS。

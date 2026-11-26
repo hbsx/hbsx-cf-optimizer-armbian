@@ -63,6 +63,8 @@ def accepted_job(job, settings, seen, now=None):
         return True
     if isinstance(command, str) and len(command) <= 64:
         try:
+            if proxy_control.parse_fdcheck(command) is not None:
+                return True
             if proxy_control.parse_fd(command) is not None:
                 return True
             if proxy_control.parse(command) is not None:
@@ -126,6 +128,8 @@ def execute_job(job, settings):
 
     try:
         command = job['command']
+        if command.startswith('/fdcheck '):
+            return proxy_control.check_fd(command, settings) + '\n线路：N1。', 'ok'
         if command == '/fdscan':
             import manual_proxy_scan
             return manual_proxy_scan.request_scan(job['expires_at']) + '\n线路：N1。', 'ok'

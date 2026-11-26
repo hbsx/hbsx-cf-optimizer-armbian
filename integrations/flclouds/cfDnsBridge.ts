@@ -3,7 +3,7 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { isIP } from 'node:net';
 import { RescueProblem } from './cfDnsRescue.js';
 import { CandidateCache, oracleDnsCommand, runPreferred, type N1Result } from './cfDnsUnified.js';
-import { parseFdCommand } from './cfFdCommand.js';
+import { parseFdCommand, parseFdCheck } from './cfFdCommand.js';
 
 type Job = { id: string; command: string; sender_id: number; chat_id: number; created_at: number; expires_at: number };
 type Pending = { job: Job; claimed: boolean; finish: (reply: N1Result) => void; timer: NodeJS.Timeout };
@@ -12,21 +12,28 @@ export const DNS_MENU = [
     { command: 'usecf', description: '使用 N1 的 CF IPv4 优选第一名' },
     { command: 'fd443', description: 'FD 443 更新 tj；可加自定义 IP' },
     { command: 'fd8443', description: 'FD 8443 更新 nj；可加自定义 IP' },
+    { command: 'fdcheck', description: '检测 IP 的 443/8443 端口，不改 DNS' },
     { command: 'use6', description: '使用 N1 的 CF IPv6 优选第一名' },
     { command: 'fdscan', description: '手动启动 N1 的 FD 优选并推送' },
 ];
 
 export function normalizeDnsCommand(text: string): string | null {
-    const input = text.trim().replace(/^(fd443|fd8443|fdscan)(?=\s|$)/i, '/$1');
+    const input = text.trim().replace(/^(fd443|fd8443|fdscan|fdcheck)(?=\s|$)/i, '/$1');
     if (isIP(input) && !input.includes('%')) return `/set ${input}`;
     if (/^(fd443|fd8443|fdscan)$/i.test(input)) return `/${input.toLowerCase()}`;
-    const match = input.match(/^\/(dns|set|usecf|usefd|use4|use6|rescue|tj|usetj|settj|rescuetj|fd443|fd8443|fdscan)(?:@\w+)?(?:\s+([\s\S]*))?$/i);
+    const match = input.match(/^\/(dns|set|usecf|usefd|use4|use6|rescue|tj|usetj|settj|rescuetj|fd443|fd8443|fdscan|fdcheck)(?:@\w+)?(?:\s+([\s\S]*))?$/i);
     if (!match) return null;
     let name = match[1].toLowerCase();
     const args = (match[2] || '').trim();
     if (name === 'rescuetj') name = args ? 'settj' : 'tj';
     if (name === 'rescue') name = args ? 'set' : 'dns';
     if (name === 'use4') name = 'usecf';
+    if (name === 'fdcheck') {
+        try {
+            const parsed = parseFdCheck('/fdcheck ' + args);
+            return parsed ? `/fdcheck ${parsed.ip}${parsed.ports.length === 1 ? ':' + parsed.ports[0] : ''}` : '/invalid';
+        } catch { return '/invalid'; }
+    }
     if (name === 'fd443' || name === 'fd8443') {
         try {
             const parsed = parseFdCommand(`/${name}${args ? ' ' + args : ''}`);
@@ -187,7 +194,7 @@ type Message = { text: string; senderId: number; chatId: string; isPrivate: bool
 
 export async function handleCfDnsMessage(message: Message): Promise<boolean> {
     if (!configured()) return false;
-    if (!message.allowBareIp && (isIP(message.text.trim()) || /^(fd443|fd8443|fdscan)(?:\s|$)/i.test(message.text.trim()))) return false;
+    if (!message.allowBareIp && (isIP(message.text.trim()) || /^(fd443|fd8443|fdscan|fdcheck)(?:\s|$)/i.test(message.text.trim()))) return false;
     const command = normalizeDnsCommand(message.text);
     if (command === null) return false; // Preserve all existing command dispatch.
     if (String(message.senderId) !== process.env.CF_DNS_OWNER_ID || !message.isPrivate
@@ -202,7 +209,7 @@ export async function handleCfDnsMessage(message: Message): Promise<boolean> {
         return true;
     }
     if (command === '/invalid') {
-        await message.reply('/dns 查看 bj、tj、nj；/fd443 [IP或IP:443] 更新 tj；/fd8443 [IP或IP:8443] 更新 nj；不带 IP 使用优选第一名。/fdscan 手动 FD 优选；/usecf、/use6 切换 CF。默认 N1，离线时用甲骨文；测速只在 N1。');
+        await message.reply('/fd443 [IP或IP:443] 更新 tj；/fd8443 [IP或IP:8443] 更新 nj；端口与命令不一致时不会更新。/fdcheck IP 单独检测 443/8443，不改 DNS。/dns 查看解析；/fdscan 手动优选；/usecf、/use6 切换 CF。');
         return true;
     }
     if (controllerBusy || queue.busy()) {
@@ -211,7 +218,7 @@ export async function handleCfDnsMessage(message: Message): Promise<boolean> {
     }
     controllerBusy = true; // Reserve before the first await, across normal and rescue commands.
     try {
-        await message.reply(command === '/fdscan' ? '正在请求 N1 启动 FD 优选…' : command === '/dns' || command === '/tj' ? '正在查询当前 DNS…' : '正在切换优选 IP，默认使用 N1…');
+        await message.reply(command.startsWith('/fdcheck ') ? '正在检查 FD 的 IP 与 TLS 端口，不修改 DNS…' : command === '/fdscan' ? '正在请求 N1 启动 FD 优选…' : command === '/dns' || command === '/tj' ? '正在查询当前 DNS…' : '正在检测并切换优选 IP，默认使用 N1…');
         try {
             const reply = await runPreferred(command,
                 () => queue.submitResult(command, message.senderId),

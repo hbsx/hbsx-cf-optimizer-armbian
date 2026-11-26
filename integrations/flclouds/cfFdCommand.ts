@@ -28,3 +28,13 @@ export function parseFdCommand(command: string): { port: 443 | 8443; ip?: string
     }
     return { port, ip: customFdAddress(parts[0]) };
 }
+
+export function parseFdCheck(command: string): { ip: string; ports: (443 | 8443)[] } | null {
+    const match = command.match(/^\/fdcheck ([^\s]+)$/);
+    if (!match) return null;
+    const parts = match[1].split(':');
+    if (parts.length > 2 || parts.length === 2 && !['443','8443'].includes(parts[1])) {
+        throw new RescueProblem('用法：/fdcheck IPv4，或 /fdcheck IPv4:443 / IPv4:8443。');
+    }
+    return { ip: customFdAddress(parts[0]), ports: parts.length === 2 ? [Number(parts[1]) as 443 | 8443] : [443,8443] };
+}

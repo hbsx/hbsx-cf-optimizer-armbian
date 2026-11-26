@@ -2,6 +2,7 @@ import { isIP } from 'node:net';
 import { CloudflareRescue, rescueCandidate, rescueSwitch, RescueProblem } from './cfDnsRescue.js';
 import { proxyRescueConfiguration } from './cfProxyRescue.js';
 import { customFdAddress, parseFdCommand } from './cfFdCommand.js';
+import { checkBeforeFdWrite, checkFdEndpoint, fdCheckCommand, type FdProbe } from './cfFdCheck.js';
 
 export type N1Result = { state: 'ok' | 'unavailable' | 'failed' | 'uncertain' | 'busy'; reply: string };
 type Slot = 'cf4' | 'cf6' | 'fd' | 'fd8443';
@@ -56,7 +57,8 @@ function display(name: string, rows: { type: string; content: string }[]) {
     return `${name}\n${rows.map(row => `${row.type} ${row.content}`).join('\n') || '暂无 A / AAAA 记录。'}`;
 }
 
-export async function oracleDnsCommand(command: string, cache: CandidateCache): Promise<string> {
+export async function oracleDnsCommand(command: string, cache: CandidateCache, fdProbe: FdProbe = checkFdEndpoint): Promise<string> {
+    if (command.startsWith('/fdcheck ')) return fdCheckCommand(command, fdProbe);
     if (command === '/fdscan') return '手动 FD 优选只能由 N1 执行。N1 当前未连接，未启动扫描。';
     if (command === '/dns' || command === '/tj') {
         const queries = command === '/tj' ? ['fd', 'fd8443'] : ['cf', 'fd', 'fd8443'];
@@ -87,8 +89,12 @@ export async function oracleDnsCommand(command: string, cache: CandidateCache): 
             if (isIP(value) !== 4 || !ips.includes(value)) throw new RescueProblem('反代 IP 不在备用允许列表中，DNS 未修改。');
             return value;
         };
+        const custom = !!fd?.ip || command.startsWith('/settj ');
+        // Reject invalid destinations before any endpoint connection or DNS API call.
+        validate(address);
+        const checked = custom ? await checkBeforeFdWrite(address, Number(port) as 443 | 8443, fdProbe) : undefined;
         return await rescueSwitch(address, client, validate, '/dns') + timestamp + `\nFD 端口：${port}（保持不变）。`
-            + (fd?.ip ? '\n手动指定地址；甲骨文仅更改 DNS，未测速、未验证家庭线路或实际节点。' : '');
+            + (checked ? `\n手动指定地址；两轮公开 CF/TLS 端口检查通过（甲骨文观测 ${checked.colo}）。未测速、未验证家庭线路或实际节点。` : '');
     }
     return await rescueSwitch(address, new CloudflareRescue(), rescueCandidate, '/dns') + timestamp;
 }
@@ -96,6 +102,11 @@ export async function oracleDnsCommand(command: string, cache: CandidateCache): 
 export async function runPreferred(command: string, normal: () => Promise<N1Result>,
     backup: () => Promise<string>, readback: () => Promise<string>): Promise<string> {
     const result = await normal();
+    if (command.startsWith('/fdcheck ')) {
+        if (result.state === 'unavailable') return backup();
+        if (result.state === 'uncertain') return 'N1 端口检测结果尚未确认，本次仅检测、未修改 DNS；请稍后重新发送 /fdcheck IP。';
+        return result.reply;
+    }
     if (command === '/fdscan') {
         if (result.state === 'unavailable') return backup();
         if (result.state === 'uncertain') return 'N1 的优选启动结果尚未确认，未重复提交。请等待原机器人推送结果后再检查。';

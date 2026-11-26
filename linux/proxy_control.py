@@ -9,12 +9,17 @@ import math
 import os
 import re
 import stat
+import time
 
 import dns_update
 import proxy_scan
 import telegram_control as control
 
-USAGE = '/fd443 [IPv4或IPv4:443] 更新 tj\n/fd8443 [IPv4或IPv4:8443] 更新 nj\n不带 IP 使用同端口优选第一名；自定义 IP 仅做公开 TLS 检查。\n/tj 查询；/usetj [地区] [名次]；/settj IPv4 使用已授权地址'
+USAGE = '/fd443 [IPv4或IPv4:443] 更新 tj\n/fd8443 [IPv4或IPv4:8443] 更新 nj\n/fdcheck IPv4[:443或8443] 只检测端口，不改 DNS\n不带 IP 使用同端口优选第一名；自定义 IP 仅做公开 TLS 检查。\n/tj 查询；/usetj [地区] [名次]；/settj IPv4 使用已授权地址'
+
+
+class CheckLimited(control.Problem):
+    pass
 
 
 def custom_address(value):
@@ -42,6 +47,18 @@ def parse_fd(text):
     if len(parts) > 2 or len(parts) == 2 and parts[1] != str(port):
         raise control.Problem('IP 后的端口必须与命令一致。')
     return port, str(custom_address(parts[0]))
+
+
+def parse_fdcheck(text):
+    words = text.strip().split()
+    if not words or words[0] != '/fdcheck':
+        return None
+    if len(words) != 2:
+        raise control.Problem(USAGE)
+    parts = words[1].split(':')
+    if len(parts) > 2 or len(parts) == 2 and parts[1] not in ('443', '8443'):
+        raise control.Problem(USAGE)
+    return str(custom_address(parts[0])), (int(parts[1]),) if len(parts) == 2 else (443, 8443)
 
 
 def parse(text):
@@ -157,8 +174,59 @@ def verify_custom(row, config):
                 or row['colo'] and result['colo'] != row['colo']):
             raise control.Problem('自定义 FD 未通过亚太 CF / TLS 检查，保留原记录。')
         return result
+    except proxy_scan.RateLimited:
+        raise CheckLimited('公开检测返回限流，已停止请求，保留原记录。') from None
     except proxy_scan.Problem:
         raise control.Problem('自定义 FD 公开验证失败或接口限流，保留原记录。') from None
+
+
+def check_public(row, config, public_probe=None):
+    measured = (public_probe or verify_custom)(row, config)
+    delay = measured['tcp_ms']
+    if (measured.get('colo') not in proxy_scan.COLOS or isinstance(delay, bool)
+            or not math.isfinite(delay) or delay <= 0
+            or row['colo'] and measured['colo'] != row['colo']):
+        raise control.Problem('FD 公开检查结果无效或机房变化，保留原记录。')
+    return measured
+
+
+def check_fd(text, settings, public_probe=None, lock=None, sleep=None):
+    parsed = parse_fdcheck(text)
+    if parsed is None:
+        raise control.Problem(USAGE)
+    ip, ports = parsed
+    _, _, config = configuration(settings, ports[0])
+    lines = ['FD 端口检测：' + ip]
+    with (lock or control.update_lock)():
+        for port in ports:
+            row = dict(ip=ip, port=port, colo='', brand='Manual')
+            try:
+                first = check_public(row, config, public_probe)
+                row['colo'] = first['colo']
+                (sleep or time.sleep)(1)
+                check_public(row, config, public_probe)
+                target = 'tj' if port == 443 else 'nj'
+                lines.append('{}：两轮公开 CF/TLS 检查通过（{}）；对应 /fd{} {}:{} → {}。'.format(
+                    port, row['colo'], port, ip, port, target))
+            except CheckLimited:
+                raise
+            except control.Problem:
+                lines.append('{}：未通过两轮公开 CF/TLS 检查，不能确认该端口可用。'.format(port))
+    return '\n'.join(lines + ['本次仅检测，未修改 DNS；未验证实际节点或下载速度。'])
+
+
+def other_port_hint(ip, failed_port, config, public_probe=None):
+    other = 8443 if failed_port == 443 else 443
+    try:
+        row = dict(ip=ip, port=other, colo='', brand='Manual')
+        check_public(row, config, public_probe)
+        target = 'nj' if other == 8443 else 'tj'
+        return ('{} 未通过检查，但 {} 公开检查通过。若客户端使用 {}，可发送 /fd{} {}:{} 更新 {}；'
+                '不会自动换端口或域名。').format(failed_port, other, other, other, ip, other, target)
+    except CheckLimited:
+        raise
+    except control.Problem:
+        return '{} 未通过检查，{} 也未检测通过；请核对 IP 和端口。'.format(failed_port, other)
 
 
 def handle(text, settings, client=None, probe=None, sleep=None, lock=None, public_probe=None):
@@ -220,17 +288,15 @@ def handle(text, settings, client=None, probe=None, sleep=None, lock=None, publi
         old_samples = []
         try:
             if custom_ip:
-                measured = (public_probe or verify_custom)(row, config)
+                measured = check_public(row, config, public_probe)
                 delay = measured['tcp_ms']
-                if (measured.get('colo') not in proxy_scan.COLOS or isinstance(delay, bool)
-                        or not math.isfinite(delay) or delay <= 0
-                        or row['colo'] and measured['colo'] != row['colo']):
-                    raise control.Problem('自定义 FD 公开检查结果无效或机房变化，保留原记录。')
                 row['colo'] = chosen.colo = measured['colo']
             else:
                 delay = (probe or verify)(row, config)
-        except control.Problem:
+        except control.Problem as error:
             rounds.append('第 {} 轮：新 {}:{} {}检查失败。'.format(index, row['ip'], port, '公开 TLS ' if custom_ip else '节点'))
+            if custom_ip and index == 1 and not isinstance(error, CheckLimited):
+                raise control.Problem(str(error) + '\n' + other_port_hint(custom_ip, port, config, public_probe)) from None
             raise
         for record in old_records:
             if record['type'] != 'A':
