@@ -58,3 +58,5 @@ cidr,port,colo,provider
 140.245.88.0/24,8443,NRT,User supplied
 154.83.93.0/24,2083,NRT,User supplied
 151.158.0.0/24,2053,HKG,User supplied
+216.23.76.0/24,8443,NRT,User supplied
+82.108.155.0/24,8443,NRT,User supplied

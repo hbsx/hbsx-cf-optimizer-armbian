@@ -4,7 +4,6 @@ ip,port,colo,provider
 43.155.166.65,8443,ICN,User supplied
 39.109.110.11,8443,HKG,User supplied
 202.61.72.139,8443,HKG,User supplied
-43.167.163.135,8443,NRT,User supplied
 45.152.65.200,8443,HKG,User supplied
 133.18.105.182,8443,KIX,User supplied
 38.175.195.234,8443,HKG,User supplied
@@ -14,7 +13,6 @@ ip,port,colo,provider
 202.61.75.68,8443,SIN,User supplied
 43.160.253.245,9443,SIN,User supplied
 20.47.101.35,8443,NRT,User supplied
-82.110.234.167,8443,NRT,User supplied
 141.11.139.219,8443,NRT,User supplied
 152.175.37.30,8443,NRT,User supplied
 167.104.164.97,443,NRT,User supplied
