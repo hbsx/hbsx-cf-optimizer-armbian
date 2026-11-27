@@ -40,3 +40,13 @@ ip,port,colo,provider
 216.23.76.85,8443,NRT,User supplied
 82.108.155.239,8443,NRT,User supplied
 141.11.139.185,8443,NRT,User supplied
+43.159.4.80,443,SIN,Tencent
+47.76.57.98,9999,HKG,Alibaba
+43.153.189.116,443,NRT,Tencent
+8.216.106.207,443,NRT,Alibaba
+47.130.35.116,8888,SIN,AWS
+18.140.52.118,443,SIN,AWS
+39.109.110.11,8443,HKG,User supplied
+139.227.76.161,8443,NRT,China Unicom Shanghai network
+43.163.225.68,4443,NRT,Tencent
+34.87.120.23,30002,SIN,Google

@@ -11,7 +11,7 @@ export function proxyRescueConfiguration(env: NodeJS.ProcessEnv = process.env, r
     const otherName = (env[`CF_PROXY_RESCUE_${otherPort}_NAME`] || (legacyPort === otherPort ? env.CF_PROXY_RESCUE_NAME : '') || '').toLowerCase().replace(/\.$/, '');
     if (env.CF_PROXY_RESCUE_ENABLED !== '1' || !name || name === original || !original
         || name === otherName || !/^[1-9][0-9]{0,4}$/.test(port) || Number(port) > 65535
-        || [80,8080,8880,2052,2082,2086,2095].includes(Number(port)) || !ips.length || ips.length > 30
+        || [80,8080,8880,2052,2082,2086,2095].includes(Number(port)) || !ips.length || ips.length > 256
         || ips.some(ip => isIP(ip) !== 4)) {
         throw new RescueProblem('甲骨文反代备用入口尚未正确配置，未修改 DNS。');
     }

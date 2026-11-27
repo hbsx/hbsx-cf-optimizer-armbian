@@ -15,6 +15,68 @@ import proxy_scan as proxy
 
 
 class ProxyTests(unittest.TestCase):
+    def test_mileet_import_rejects_http_proxies_bad_ports_and_non_apac(self):
+        text='ip,port,tls_ok,kind,colo,asn,org,fail_count\n'
+        text+='43.155.153.147,8443,1,sni-proxy,NRT,132203,Tencent,0\n'
+        text+='43.155.153.148,443,1,http-proxy,NRT,132203,Tencent,0\n'
+        text+='43.155.153.149,8443,0,sni-proxy,NRT,132203,Tencent,0\n'
+        text+='43.155.153.150,80,1,sni-proxy,NRT,132203,Tencent,0\n'
+        text+='43.155.153.151,443,1,sni-proxy,LAX,132203,Tencent,0\n'
+        text+='43.155.153.152,443,1,sni-proxy,NRT,132203,Tencent,1\n'
+        self.assertEqual([proxy.key(r) for r in proxy.mileet_rows(text)],[('43.155.153.147',8443)])
+
+    def test_multiple_sources_are_deduplicated_and_partial_failure_keeps_valid_source(self):
+        first=b'ip,port,tls,colo,asn,isp,fail_count\n43.155.153.147,443,true,NRT,AS132203,Tencent,0\n'
+        second=first+b'43.155.153.148,8443,true,NRT,AS132203,Tencent,0\n'
+        class Response:
+            def __init__(self,body):self.body=body
+            def __enter__(self):return self
+            def __exit__(self,*_):pass
+            def read(self,_):return self.body
+        class Opener:
+            def open(self,url,timeout):
+                url = getattr(url, 'full_url', url)
+                if url==proxy.SOURCES[0][1]:return Response(first)
+                if url==proxy.SOURCES[1][1]:return Response(second)
+                raise OSError('unavailable')
+        settings=types.SimpleNamespace(proxy='http://127.0.0.1:7890',max_candidates=10000)
+        with patch.object(proxy.urllib.request,'build_opener',return_value=Opener()):
+            rows=proxy.fetch_pool(settings)
+        self.assertEqual({proxy.key(r) for r in rows},{('43.155.153.147',443),('43.155.153.148',8443)})
+        self.assertEqual(settings.pool_failures,['mileet'])
+        self.assertFalse(hasattr(settings,'allowed_nodes'))
+
+    def test_all_source_failures_do_not_return_a_fake_successful_empty_pool(self):
+        settings=types.SimpleNamespace(proxy='http://127.0.0.1:7890',max_candidates=10000)
+        with patch.object(proxy.urllib.request,'build_opener') as opener:
+            opener.return_value.open.side_effect=OSError('unavailable')
+            with self.assertRaises(proxy.Problem):proxy.fetch_pool(settings)
+
+    def test_larger_public_reserve_does_not_expand_formal_private_permission(self):
+        text='ip,port,colo,provider\n'+''.join('43.155.{}.{} ,443,NRT,Tencent\n'.format(i//250,i%250+1).replace(' ','') for i in range(300))
+        with self.assertRaises(proxy.Problem):proxy.seed_rows(text)
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory)/'proxy-public-candidates.csv').write_text(text)
+            cfg=self.settings(directory)
+            self.assertEqual(len(cfg.public_seeds),300)
+            self.assertEqual(len(cfg.allowed_nodes),3)
+
+    def test_large_subnet_reserve_rotates_bounded_work_and_all_host_offsets(self):
+        text='cidr,port,colo,provider\n'+''.join('43.{}.{}.0/24,443,NRT,Tencent\n'.format(150+i//250,i%250) for i in range(300))
+        ranges=proxy.cidr_rows(text)
+        first=proxy.sample_cidrs(ranges,16,cycle=0)
+        self.assertEqual(len(first),128*16)
+        all_hosts={};visits={}
+        for cycle in range(40):
+            sample=proxy.sample_cidrs(ranges,16,cycle=cycle)
+            self.assertEqual(len(sample),128*16)
+            grouped={}
+            for row in sample:grouped.setdefault('.'.join(row['ip'].split('.')[:3]),set()).add(row['ip'])
+            for network,hosts in grouped.items():
+                all_hosts.setdefault(network,set()).update(hosts);visits[network]=visits.get(network,0)+1
+        self.assertEqual(len(all_hosts),300)
+        self.assertTrue(all(len(all_hosts[k])==254 for k,n in visits.items() if n>=16))
+
     def settings(self, directory, **overrides):
         seed = Path(directory) / 'candidates.csv'
         seed.write_text('ip,port,colo,provider\n39.105.24.90,443,HKG,Alibaba\n'

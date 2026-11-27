@@ -30,6 +30,7 @@ class Client:
 
 class ProxyControlTests(unittest.TestCase):
     def setUp(self):
+        pc.FAILED_CANDIDATES.clear()
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.row = dict(ip='39.105.108.60', port=443, colo='HKG', brand='test',
@@ -166,7 +167,8 @@ class ProxyControlTests(unittest.TestCase):
     def test_fresh_scan_does_not_inherit_old_endpoint_failures(self):
         self.two_candidates();probe=Mock(side_effect=pc.CandidateFailed('offline'))
         with self.assertRaises(control.Problem):self.call('/fd443',probe=probe)
-        self.write_snapshot(regions={'HKG':self.config.seeds})
+        self.write_snapshot(regions={'HKG':self.config.seeds},
+                            generated_at=(dt.datetime.now(dt.timezone.utc)+dt.timedelta(seconds=1)).isoformat())
         self.assertEqual(len(pc.snapshot(self.config,443)[0]),2)
 
     def test_rate_limit_or_configuration_error_does_not_try_another_candidate(self):

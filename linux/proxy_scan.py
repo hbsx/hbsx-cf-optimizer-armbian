@@ -37,6 +37,11 @@ COLOS = PRIORITY_COLOS + tuple(c for c in (
     'SYD SZX TAO TEN TEZ TNA TPE TYN UDR ULN URT VTE WLG WUH XFN XIY'
 ).split() if c not in PRIORITY_COLOS)
 SOURCE = 'https://raw.githubusercontent.com/skfoa/tg-proxy-fetcher/main/data/scan_ips.csv'
+SOURCES = (
+    ('scan', SOURCE, 'scan'),
+    ('proxyip', 'https://raw.githubusercontent.com/skfoa/tg-proxy-fetcher/main/data/proxyip.csv', 'scan'),
+    ('mileet', 'https://cf.mileet.com/api/export?format=csv&limit=5000', 'mileet'),
+)
 SOURCE_LIMIT = 24 * 1024 * 1024
 # Exclude conventional HTTP ports even when an upstream source labels them TLS.
 PLAINTEXT_PORTS = frozenset((80, 8080, 8880, 2052, 2082, 2086, 2095))
@@ -99,14 +104,14 @@ def endpoint(ip, port, colo, brand):
     return dict(ip=str(address), port=int(port), colo=colo, brand=brand)
 
 
-def seed_rows(text, allow_empty=False):
+def seed_rows(text, allow_empty=False, limit=256):
     reader = csv.DictReader(io.StringIO(text.lstrip('\ufeff')))
     if not {'ip', 'port', 'colo', 'provider'}.issubset(reader.fieldnames or []):
         raise Problem('反代候选文件缺少 ip、port、colo、provider 字段。')
     rows = {}
     for index, row in enumerate(reader):
-        if index >= 256:
-            raise Problem('本机反代候选最多允许 256 条。')
+        if index >= limit:
+            raise Problem('本机反代候选最多允许 {} 条。'.format(limit))
         try:
             item = endpoint(row['ip'], row['port'], row['colo'], row['provider'])
         except (ValueError, TypeError, KeyError):
@@ -143,14 +148,36 @@ def remote_rows(text, limit=5000):
     return list(rows.values())
 
 
+def mileet_rows(text, limit=5000):
+    """Normalize TLS SNI entrances only; HTTP proxies are not CF entrances."""
+    reader = csv.DictReader(io.StringIO(text.lstrip('\ufeff')))
+    required = {'ip','port','tls_ok','kind','colo','asn','org','fail_count'}
+    if not required.issubset(reader.fieldnames or []):
+        raise Problem('补充候选池格式不完整。')
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=['ip','port','tls','colo','asn','isp','fail_count'])
+    writer.writeheader()
+    for index, row in enumerate(reader):
+        if index >= 100000:
+            raise Problem('补充候选池行数超出限制。')
+        if row.get('kind') != 'sni-proxy' or row.get('tls_ok') != '1':
+            continue
+        asn = row.get('asn', '')
+        if asn.isdecimal():
+            asn = 'AS' + asn
+        writer.writerow(dict(ip=row['ip'],port=row['port'],tls='true',colo=row['colo'],
+                             asn=asn,isp=row['org'],fail_count=row['fail_count']))
+    return remote_rows(output.getvalue(), limit)
+
+
 def cidr_rows(text):
     reader = csv.DictReader(io.StringIO(text.lstrip('\ufeff')))
     if not {'cidr', 'port', 'colo', 'provider'}.issubset(reader.fieldnames or []):
         raise Problem('反代网段候选文件缺少必要字段。')
     rows = {}
     for index, row in enumerate(reader):
-        if index >= 128:
-            raise Problem('反代网段候选最多允许 128 条。')
+        if index >= 512:
+            raise Problem('反代网段候选最多允许 512 条。')
         try:
             network = ipaddress.IPv4Network(row['cidr'], strict=True)
             if (network.prefixlen != 24 or not network.is_global or network.is_multicast
@@ -169,14 +196,23 @@ def sample_cidrs(ranges, count=16, cycle=None):
     if cycle is None:
         # Three-day rotation without any last-run/history file.
         cycle = dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).date().toordinal() // 3
+    # Keep larger reserve pools without increasing per-run subnet work beyond
+    # 128 ranges. The absolute window position counts each range's visits,
+    # so host offsets advance on visits rather than skipped calendar cycles.
+    visits = [(item, cycle) for item in ranges]
+    if len(ranges) > 128:
+        ordered = sorted(ranges, key=lambda r: hashlib.sha256(
+            '{}:{}'.format(r['cidr'], r['port']).encode('ascii')).digest())
+        visits = [(ordered[(cycle * 128 + i) % len(ordered)], (cycle * 128 + i) // len(ordered))
+                  for i in range(128)]
     rows = {}
-    for item in ranges:
+    for item, visit in visits:
         network = ipaddress.IPv4Network(item['cidr'])
         seed = hashlib.sha256('{}:{}'.format(network, item['port']).encode('ascii')).digest()
         offsets = list(range(1, 255))
         random.Random(int.from_bytes(seed, 'big')).shuffle(offsets)
         for index in range(count):
-            offset = offsets[(cycle * count + index) % len(offsets)]
+            offset = offsets[(visit * count + index) % len(offsets)]
             row = endpoint(str(network.network_address + offset), item['port'], item['colo'], item['brand'])
             rows[key(row)] = row
     return list(rows.values())
@@ -239,7 +275,7 @@ class Settings:
             text = (base / 'proxy-public-candidates.csv').read_text(encoding='utf-8')
             if len(text) > 65536:
                 raise Problem('本机公开候选文件过大。')
-            self.public_seeds = seed_rows(text, allow_empty=True)
+            self.public_seeds = seed_rows(text, allow_empty=True, limit=512)
         except FileNotFoundError:
             self.public_seeds = []
         except OSError:
@@ -304,11 +340,28 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 def fetch_pool(settings):
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({'http': settings.proxy, 'https': settings.proxy}), NoRedirect())
-    with opener.open(SOURCE, timeout=35) as response:
-        payload = response.read(SOURCE_LIMIT + 1)
-    if len(payload) > SOURCE_LIMIT:
-        raise Problem('远程候选池过大。')
-    return remote_rows(payload.decode('utf-8-sig'), settings.max_candidates)
+    rows, completed, failures = {}, [], []
+    for name, url, kind in SOURCES:
+        try:
+            request = urllib.request.Request(url, headers={
+                'User-Agent': 'cf-optimizer-pool-audit/1', 'Accept': 'text/csv,text/plain;q=0.9'})
+            with opener.open(request, timeout=20) as response:
+                payload = response.read(SOURCE_LIMIT + 1)
+            if len(payload) > SOURCE_LIMIT:
+                raise Problem('远程候选池过大。')
+            parser = mileet_rows if kind == 'mileet' else remote_rows
+            parsed = parser(payload.decode('utf-8-sig'), settings.max_candidates)
+            completed.append(dict(name=name, count=len(parsed)))
+            for row in parsed:
+                identity = key(row)
+                if identity not in rows and len(rows) < settings.max_candidates:
+                    rows[identity] = row
+        except Exception:
+            failures.append(name)
+    settings.pool_sources, settings.pool_failures = completed, failures
+    if not completed:
+        raise Problem('所有公开候选源获取失败。')
+    return list(rows.values())
 
 
 class Prober:
@@ -517,6 +570,8 @@ def scan(settings, prober=None, fetcher=fetch_pool):
         status(settings, '正在获取公开反代候选池')
         try:
             rows.update((key(row), row) for row in fetcher(settings))
+            if getattr(settings, 'pool_failures', []):
+                notes.append('部分公开候选源不可用，本轮已使用其余来源。')
         except Exception:
             notes.append('候选池获取失败，本轮仅测试本机候选。')
     rows.update((key(row), row) for row in settings.cidr_seeds)

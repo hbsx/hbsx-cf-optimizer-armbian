@@ -11,6 +11,9 @@ async function main() {
     assert.throws(() => proxyRescueConfiguration({ ...process.env, CF_PROXY_RESCUE_NAME: 'bj.example.com' }));
     assert.throws(() => proxyRescueConfiguration({ ...process.env, CF_PROXY_RESCUE_ENABLED: '0' }));
     assert.throws(() => proxyRescueConfiguration({ ...process.env, CF_PROXY_RESCUE_IPS: 'hostname' }));
+    const expanded=Array.from({length:256},(_,i)=>`43.155.${Math.floor(i/254)}.${i%254+1}`);
+    assert.equal(proxyRescueConfiguration({...process.env,CF_PROXY_RESCUE_IPS:expanded.join(',')}).ips.length,256);
+    assert.throws(()=>proxyRescueConfiguration({...process.env,CF_PROXY_RESCUE_IPS:[...expanded,'43.156.1.1'].join(',')}));
     assert.throws(() => rescueCandidate('39.105.108.60')); // Original official-only boundary stays.
     const saved = globalThis.fetch;
     let rows: any[] = [{ id: '1'.repeat(32), type: 'A', name: 'tj.example.com', content: '39.105.24.90',

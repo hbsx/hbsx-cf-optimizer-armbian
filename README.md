@@ -151,15 +151,15 @@ systemctl show cf-optimizer-proxy -p ActiveState -p Result -p StatusText
 sudo cat /run/cf-optimizer/best-proxy-ips.json
 ```
 
-从 [skfoa/tg-proxy-fetcher 的公开 CSV](https://raw.githubusercontent.com/skfoa/tg-proxy-fetcher/main/data/scan_ips.csv) 获取候选，筛选亚太地区、TLS 开启、上游失败计数为零的地址。除腾讯、阿里、华为、AWS、Oracle 等常见厂商外，也覆盖 ByteVirt、LucidaCloud、Leaseweb、VMISS、Zenlayer 等；其他具有有效 ASN 和厂商名称的来源也参与公开初筛。排除 CF 官方地址，避免混作第三方反代。默认公开候选上限 10000 条，每地区公开检查最多 40 条、全局最多 240 条；按 443、8443、其他 TLS 端口轮流分配名额，每组同一厂商最多占 3 个公开检查名额。其他端口组兼顾不同实际端口，保留本机候选优先级。上游标签仅用于初筛；地区以本轮验证结果为准。仅请求列表中的具体 IP 和端口，不扫描厂商整段。
+从 [扫描库 CSV](https://raw.githubusercontent.com/skfoa/tg-proxy-fetcher/main/data/scan_ips.csv)、[反代专用 CSV](https://raw.githubusercontent.com/skfoa/tg-proxy-fetcher/main/data/proxyip.csv)、[Mileet 公开导出](https://cf.mileet.com/api/export?format=csv&limit=5000) 合并获取候选，按 IP:端口去重，筛选亚太地区、TLS 开启、上游失败计数为零的地址。Mileet 仅接受 `kind=sni-proxy`、`tls_ok=1`，普通 HTTP 代理不导入。一个来源不可用时继续使用其他来源，全部失败才退回本机候选；所有获取沿用配置代理、证书验证、大小限制和禁止重定向，不直连降级。除腾讯、阿里、华为、AWS、Oracle 等常见厂商外，也覆盖 ByteVirt、LucidaCloud、Leaseweb、VMISS、Zenlayer 等；其他具有有效 ASN 和厂商名称的来源也参与公开初筛。排除 CF 官方地址，避免混作第三方反代。默认公开候选上限 10000 条，每地区公开检查最多 40 条、全局最多 240 条；按 443、8443、其他 TLS 端口轮流分配名额，每组同一厂商最多占 3 个公开检查名额。其他端口组兼顾不同实际端口，保留本机候选优先级。上游标签仅用于初筛；地区以本轮验证结果为准。仅请求列表中的具体 IP 和端口，不扫描厂商整段。
 
 同时加载本机 `proxy-candidates.csv`，优先香港 HKG、东京 NRT、新加坡 SIN 和大阪 KIX，其他亚太机房也参与。允许范围依据 [Cloudflare 状态页](https://www.cloudflarestatus.com/)的 Asia/Oceania 分组及[网络机房列表](https://www.cloudflare.com/network/)，在代码中固定，不根据入口 IP 的注册地猜测。自带候选在过去的 N1 测试中可用，不保证以后一直有效。安装器保留已有候选文件，方便维护自己的列表；新安装才复制默认文件。
 
-单次公开粗筛达标的新地址保存在 `proxy-public-candidates.csv`，后续可参与公开检查，未完成实际节点验证前不会参与 DNS 更新。此文件不会扩充私有节点验证允许列表；安装升级会保留本机已有版本。粗筛结果不等同于正式三轮复测达标。
+单次公开粗筛达标的新地址保存在 `proxy-public-candidates.csv`，最多 512 条，后续可参与公开检查，未完成实际节点验证前不会参与 DNS 更新。正式私有节点验证允许名单仍最多 256 条，公开池不会扩充其权限；安装升级会保留本机已有版本。粗筛结果不等同于正式三轮复测达标。
 
 仅保留 TLS 入口。80、8080、8880、2052、2082、2086、2095 等常见明文 HTTP 端口被固定排除，即使公开来源标记 `tls=true` 也不会导入。此规则同时覆盖单 IP、网段采样和缓存 DNS 候选。443、8443、2053、2083、2087、2096、9443 以及其他实际通过 TLS 验证的自定义端口仍可参与；连接时必须验证目标主机证书，不会因 TLS 失败退回明文 HTTP。
 
-`proxy-cidrs.csv` 保存第三方 `/24` 网段、端口、已知机房及来源；同一个网段的不同端口分别保留。每轮每段默认采样 16 个地址（`CF_PROXY_CIDR_SAMPLES_PER_RANGE`，允许 1–64），按北京时间三天周期轮换，每 16 个周期覆盖该段的 254 个主机地址。不保存轮换历史，不在每次运行时写配置文件。网段标签仅用于分配初筛名额，相邻 IP 必须重新通过公开 CF 检查并确认实际机房在亚太，不能直接作为有效节点或 DNS 更新候选。网段池不会扩充私有节点验证允许列表。默认不遍历全部网段，以控制 N1 的运行时间；公开检查全局 240 条、实际节点验证全局 30 条的上限继续生效。
+`proxy-cidrs.csv` 保存第三方 `/24` 网段、端口、已知机房及来源，最多 512 组；同一个网段的不同端口分别保留。每轮最多抽取 128 组，每组默认采样 16 个地址（`CF_PROXY_CIDR_SAMPLES_PER_RANGE`，允许 1–64）。大池按北京时间三天周期轮换网段，组内地址按该组累计被选中的次数推进，累计选中 16 次覆盖 254 个主机地址；只有网段不超过 128 组时才等同于 16 个扫描周期。轮换由日期及静态名单计算，不保存轮换历史，不在每次运行时写配置文件。网段标签仅用于分配初筛名额，相邻 IP 必须重新通过公开 CF 检查并确认实际机房在亚太，不能直接作为有效节点或 DNS 更新候选。网段池不会扩充私有节点验证允许列表。默认不遍历全部网段，以控制 N1 的运行时间；公开检查全局 240 条、实际节点验证全局 30 条的上限继续生效。
 
 所有 TCP、TLS、WebSocket 和下载测试都绑定配置中的物理网卡，绕过本机 Mihomo；候选池获取和 TG 推送使用配置中的代理。先做有数量上限的 TCP/公开 CF 检查，再按地区选择候选；下载逐条进行，默认三轮、每轮 4 MiB，所有轮次完整成功、地区一致且不低于 `CF_PROXY_MIN_MBPS=8` 才入选。HTTP 429 会停止本轮，不把旧结果当成新结果。
 
