@@ -153,10 +153,11 @@ def execute_job(job, settings):
             target_port = fd[0] if fd else 443 if command == '/usefd' else None
             dns, _, _ = proxy_control.configuration(settings, target_port) if target_port else proxy_control.configuration(settings)
             mapped = '/fd443' if command == '/usefd' else command
-            reply = proxy_control.handle(mapped, settings, client=JobDNS(*dns))
+            deadline = time.monotonic() + max(0, job['expires_at'] - time.time() - 35)
+            reply = proxy_control.handle(mapped, settings, client=JobDNS(*dns), deadline=deadline)
         else:
             reply = control.handle('/use4' if command == '/usecf' else command, settings, client)
-        return reply + '\n线路：N1。', 'uncertain' if attempted and reply.startswith('⚠️') else 'ok'
+        return reply + '\n线路：N1。', 'uncertain' if attempted and '⚠️' in reply else 'ok'
     except dns_update.DNSProblem as error:
         return str(error), 'uncertain' if attempted else 'unavailable'
     except control.Problem as error:

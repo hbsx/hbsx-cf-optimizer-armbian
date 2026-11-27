@@ -110,7 +110,7 @@ class BridgeTests(unittest.TestCase):
 
     def test_custom_8443_routes_to_nj_and_expiration_guards_writes(self):
         def cfg(settings,port):return ('token','zone','nj.example.com'),port,'config'
-        def handle(command,settings,client):
+        def handle(command,settings,client,deadline=None):
             self.assertEqual(command,'/fd8443 82.110.234.167')
             self.assertEqual(client.name,'nj.example.com')
             client.request('POST','/batch',{})
@@ -121,6 +121,17 @@ class BridgeTests(unittest.TestCase):
                 patch.object(bridge.control.ControlDNS,'request') as write:
             self.assertEqual(bridge.execute_job(job,self.settings)[1],'failed')
         configuration.assert_called_once_with(self.settings,8443);write.assert_not_called()
+
+    def test_wrapped_uncertain_fd_reply_is_not_reported_as_success(self):
+        job=dict(self.job,command='/fd8443')
+        def handle(command,settings,client,deadline=None):
+            client.request('POST','/batch',{})
+            return 'DNS compare\nrounds\n⚠️ unknown write'
+        with patch.object(bridge.proxy_control,'configuration',return_value=(('token','zone','nj.example.com'),8443,'config')), \
+                patch.object(bridge.proxy_control,'handle',side_effect=handle), \
+                patch.object(bridge.time,'time',return_value=1050), \
+                patch.object(bridge.control.ControlDNS,'request'):
+            self.assertEqual(bridge.execute_job(job,self.settings)[1],'uncertain')
 
     def test_fdcheck_job_never_constructs_a_dns_client(self):
         job=dict(self.job,command='/fdcheck 82.110.234.167')

@@ -114,6 +114,96 @@ class ProxyControlTests(unittest.TestCase):
             self.call('/usetj', c, Mock(side_effect=[20, control.Problem('failed')]))
         self.assertFalse(c.writes)
 
+    def two_candidates(self):
+        second=dict(self.row,ip='39.106.2.1',mbps=50)
+        self.config.seeds=[self.row,second]
+        self.config.allowed_nodes=frozenset(pc.proxy_scan.key(r) for r in self.config.seeds)
+        self.write_snapshot(regions={'HKG':[self.row,second]})
+        return second
+
+    def test_failed_fastest_candidate_is_skipped_and_next_candidate_is_checked_twice(self):
+        second=self.two_candidates();client=Client()
+        probe=Mock(side_effect=[pc.CandidateFailed('offline'),20,21])
+        reply=self.call('/fd443',client,probe)
+        self.assertEqual(client.rows[0]['content'],second['ip'])
+        self.assertEqual([c.args[0]['ip'] for c in probe.call_args_list],[self.row['ip'],second['ip'],second['ip']])
+        self.assertEqual(len(client.writes),1);self.assertIn('跳过候选 1',reply)
+        self.assertEqual(pc.snapshot(self.config,443)[0],[second])
+        self.assertEqual(len(self.config.allowed_nodes),2)
+
+    def test_failure_on_second_round_still_tries_next_candidate(self):
+        second=self.two_candidates();client=Client()
+        probe=Mock(side_effect=[20,pc.CandidateFailed('unstable'),21,22])
+        self.call('/fd443',client,probe)
+        self.assertEqual(client.rows[0]['content'],second['ip']);self.assertEqual(probe.call_count,4)
+
+    def test_8443_failure_uses_next_8443_and_never_a_faster_443(self):
+        first=dict(self.row,ip='82.110.234.167',port=8443,colo='NRT',mbps=60)
+        second=dict(first,ip='43.167.163.135',mbps=40)
+        self.config.seeds=[self.row,first,second]
+        self.config.allowed_nodes=frozenset(pc.proxy_scan.key(r) for r in self.config.seeds)
+        self.write_snapshot(regions={'HKG':[dict(self.row,mbps=1000)],'NRT':[first,second]})
+        client=Client();client.name='nj.example.com'
+        for r in client.rows:r['name']=client.name
+        probe=Mock(side_effect=[pc.CandidateFailed('offline'),20,20])
+        with patch.object(pc,'configuration',return_value=(('token','zone',client.name),8443,self.config)):
+            reply=self.call('/fd8443',client,probe)
+        self.assertEqual(client.rows[0]['content'],second['ip'])
+        self.assertTrue(all(c.args[0]['port']==8443 for c in probe.call_args_list))
+        self.assertEqual(len(client.writes),1);self.assertIn('跳过候选 1',reply)
+
+    def test_all_failed_candidates_never_write_and_failure_memory_expires(self):
+        self.two_candidates();client=Client();probe=Mock(side_effect=pc.CandidateFailed('offline'))
+        with self.assertRaises(control.Problem):self.call('/fd443',client,probe)
+        self.assertEqual(probe.call_count,2);self.assertFalse(client.writes)
+        probe.reset_mock()
+        with self.assertRaises(control.Problem):self.call('/fd443',client,probe)
+        probe.assert_not_called()
+        now=pc.time.monotonic()
+        with patch.object(pc.time,'monotonic',return_value=now+pc.FAILURE_TTL+1):
+            self.assertEqual(len(pc.snapshot(self.config,443)[0]),2)
+
+    def test_fresh_scan_does_not_inherit_old_endpoint_failures(self):
+        self.two_candidates();probe=Mock(side_effect=pc.CandidateFailed('offline'))
+        with self.assertRaises(control.Problem):self.call('/fd443',probe=probe)
+        self.write_snapshot(regions={'HKG':self.config.seeds})
+        self.assertEqual(len(pc.snapshot(self.config,443)[0]),2)
+
+    def test_rate_limit_or_configuration_error_does_not_try_another_candidate(self):
+        self.two_candidates()
+        for error in [pc.CheckLimited('429'),control.Problem('configuration')]:
+            client=Client();probe=Mock(side_effect=error)
+            with self.subTest(error=error),self.assertRaises(control.Problem):self.call('/fd443',client,probe)
+            self.assertEqual(probe.call_count,1);self.assertFalse(client.writes)
+            self.assertEqual(len(pc.snapshot(self.config,443)[0]),2)
+
+    def test_dns_change_between_candidates_stops_the_entire_update(self):
+        self.two_candidates();client=Client();before=client.records()
+        changed=[dict(before[0],content='39.106.84.178')]
+        probe=Mock(side_effect=[pc.CandidateFailed('offline'),20,20])
+        with patch.object(client,'records',side_effect=[before,changed]),self.assertRaises(control.Problem):
+            self.call('/fd443',client,probe)
+        self.assertEqual(probe.call_count,1);self.assertFalse(client.writes)
+
+    def test_uncertain_write_never_attempts_another_candidate(self):
+        self.two_candidates();client=Client();probe=Mock(return_value=20)
+        with patch.object(client,'request',side_effect=pc.dns_update.DNSProblem('lost')) as write:
+            reply=self.call('/fd443',client,probe)
+        self.assertIn('未确认',reply);self.assertEqual(probe.call_count,2);write.assert_called_once()
+
+    def test_explicit_address_failure_never_changes_to_a_different_ip(self):
+        self.two_candidates();client=Client();probe=Mock(side_effect=pc.CandidateFailed('offline'))
+        with self.assertRaises(control.Problem):self.call('/settj '+self.row['ip'],client,probe)
+        self.assertEqual(probe.call_count,1);self.assertFalse(client.writes)
+
+    def test_selection_time_budget_stops_before_another_candidate(self):
+        self.two_candidates();client=Client();clock=[1000]
+        def failure(*_):clock[0]+=80;raise pc.CandidateFailed('offline')
+        probe=Mock(side_effect=failure)
+        with patch.object(pc.time,'monotonic',side_effect=lambda:clock[0]),self.assertRaises(control.Problem):
+            self.call('/fd443',client,probe)
+        self.assertEqual(probe.call_count,1);self.assertFalse(client.writes)
+
     def test_each_round_reports_actual_old_and_new_tcp_values(self):
         self.config.allowed_nodes=frozenset([('39.105.108.60',443),('39.105.24.90',443)])
         tcp=Mock(side_effect=[{'tcp_ms':25.5},{'tcp_ms':30.75}])

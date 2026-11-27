@@ -22,6 +22,30 @@ class CheckLimited(control.Problem):
     pass
 
 
+class CandidateFailed(control.Problem):
+    """Only a failed endpoint probe permits trying the next candidate."""
+
+
+# Process memory only. A fresh scan or a worker restart clears these exclusions.
+FAILED_CANDIDATES = {}
+FAILURE_TTL = 15 * 60
+MAX_SWITCH_CANDIDATES = 8
+
+
+def prune_failures(stamp):
+    now = time.monotonic()
+    for item, expires in list(FAILED_CANDIDATES.items()):
+        if item[0] != stamp or expires <= now:
+            del FAILED_CANDIDATES[item]
+
+
+def remember_failure(stamp, row):
+    prune_failures(stamp)
+    if len(FAILED_CANDIDATES) >= 256:
+        del FAILED_CANDIDATES[min(FAILED_CANDIDATES, key=FAILED_CANDIDATES.get)]
+    FAILED_CANDIDATES[(stamp, row['ip'], row['port'])] = time.monotonic() + FAILURE_TTL
+
+
 def custom_address(value):
     try:
         address = ipaddress.IPv4Address(value)
@@ -128,6 +152,7 @@ def snapshot(config, port, now=None):
         age = (now or dt.datetime.now(dt.timezone.utc)) - generated
         if not -300 <= age.total_seconds() <= 96 * 3600 or data.get('node_verified') is not True:
             raise ValueError()
+        prune_failures(data['generated_at'])
         rows, seen = [], set()
         for region in proxy_scan.COLOS:
             for row in data['regions'].get(region, []):
@@ -142,6 +167,8 @@ def snapshot(config, port, now=None):
                        for k in ('mbps', 'tcp_ms')):
                     continue
                 if proxy_scan.key(row) not in seen:
+                    if (data['generated_at'], row['ip'], port) in FAILED_CANDIDATES:
+                        continue
                     rows.append(dict(row))
                     seen.add(proxy_scan.key(row))
         return sorted(rows, key=lambda r: (-r['mbps'], r['tcp_ms'], r['ip'])), data['generated_at']
@@ -156,11 +183,13 @@ def verify(row, config):
     try:
         public = prober.probe(row)
         if not public.get('ok') or public.get('colo') != row['colo']:
-            raise control.Problem('反代公开 CF 检查未通过，保留原记录。')
+            raise CandidateFailed('反代公开 CF 检查未通过，未提交 DNS 更新。')
         node = prober.probe(row, node=True)
         if not node.get('ok') or node.get('colo') != row['colo']:
-            raise control.Problem('反代实际节点握手未通过，保留原记录。')
+            raise CandidateFailed('反代实际节点握手未通过，未提交 DNS 更新。')
         return node['tcp_ms']
+    except proxy_scan.RateLimited:
+        raise CheckLimited('反代检测返回限流，已停止检查，保留原记录。') from None
     except proxy_scan.Problem:
         raise control.Problem('反代验证失败或接口限流，保留原记录。') from None
 
@@ -229,7 +258,9 @@ def other_port_hint(ip, failed_port, config, public_probe=None):
         return '{} 未通过检查，{} 也未检测通过；请核对 IP 和端口。'.format(failed_port, other)
 
 
-def handle(text, settings, client=None, probe=None, sleep=None, lock=None, public_probe=None):
+def handle(text, settings, client=None, probe=None, sleep=None, lock=None, public_probe=None,
+           deadline=None, _selected=None, _config=None, _baseline=None):
+    automatic = text.strip() in ('/fd443', '/fd8443', '/usetj')
     target_port = None
     custom_ip = None
     fd = parse_fd(text)
@@ -240,7 +271,8 @@ def handle(text, settings, client=None, probe=None, sleep=None, lock=None, publi
     if parsed is None:
         raise control.Problem(USAGE)
     command, arg, rank = parsed
-    dns, port, config = configuration(settings, target_port) if target_port else configuration(settings)
+    dns, port, config = (_config if _config is not None else
+                         configuration(settings, target_port) if target_port else configuration(settings))
     client = client or control.ControlDNS(*dns)
     if command == '/tj':
         records = client.records()
@@ -259,8 +291,32 @@ def handle(text, settings, client=None, probe=None, sleep=None, lock=None, publi
             lines.append(str(e))
         lines.append(USAGE)
         return '\n'.join(lines)
+    if automatic and _selected is None:
+        rows, stamp = snapshot(config, port)
+        if not rows:
+            raise control.Problem('没有可检查的同端口候选；请 /fdscan 重新优选，DNS 未修改。')
+        limit = min(deadline, time.monotonic() + 75) if deadline is not None else time.monotonic() + 75
+        failures, baseline = [], []
+        with (lock or control.update_lock)():
+            for index, candidate in enumerate(rows[:MAX_SWITCH_CANDIDATES], 1):
+                if time.monotonic() >= limit:
+                    raise control.Problem('\n'.join(failures + ['本次候选检查时间已用尽，DNS 未修改；请 /fdscan 刷新后再试。']))
+                try:
+                    result = handle(text, settings, client=client, probe=probe, sleep=sleep,
+                                    lock=contextlib.nullcontext, public_probe=public_probe,
+                                    deadline=limit, _selected=candidate, _config=(dns, port, config),
+                                    _baseline=baseline)
+                    return '\n'.join(failures + [result])
+                except CandidateFailed as error:
+                    remember_failure(stamp, candidate)
+                    failures.append('跳过候选 {}：{}:{}；{}'.format(
+                        index, candidate['ip'], port, str(error).splitlines()[-1]))
+        raise control.Problem('\n'.join(failures + [
+            '已检查 {} 个同端口候选，均未通过两轮验证，DNS 未修改；请 /fdscan 重新优选。'.format(min(len(rows), MAX_SWITCH_CANDIDATES))]))
     if custom_ip:
         row = dict(ip=custom_ip, port=port, colo='', brand='Manual')
+    elif _selected is not None:
+        row = _selected
     elif command == '/usetj':
         rows, _ = snapshot(config, port)
         rows = [r for r in rows if not arg or r['colo'] == arg]
@@ -282,17 +338,27 @@ def handle(text, settings, client=None, probe=None, sleep=None, lock=None, publi
         return ipaddress.IPv4Address(value)
     old_records, rounds = [], []
     def observe_before(records):
+        if _baseline is not None:
+            fingerprint = dns_update.fingerprint(records)
+            if _baseline and _baseline[0] != fingerprint:
+                raise control.Problem('检查候选期间 DNS 已变化，本次未覆盖；请 /dns 查询后重发。')
+            if not _baseline:
+                _baseline.append(fingerprint)
         old_records[:] = records
     def probe_round(*_):
         index = len(rounds) + 1
         old_samples = []
         try:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise control.Problem('本次候选检查时间已用尽，未提交 DNS 更新。')
             if custom_ip:
                 measured = check_public(row, config, public_probe)
                 delay = measured['tcp_ms']
                 row['colo'] = chosen.colo = measured['colo']
             else:
                 delay = (probe or verify)(row, config)
+            if deadline is not None and time.monotonic() >= deadline:
+                raise control.Problem('本次候选检查时间已用尽，未提交 DNS 更新。')
         except control.Problem as error:
             rounds.append('第 {} 轮：新 {}:{} {}检查失败。'.format(index, row['ip'], port, '公开 TLS ' if custom_ip else '节点'))
             if custom_ip and index == 1 and not isinstance(error, CheckLimited):
@@ -319,12 +385,13 @@ def handle(text, settings, client=None, probe=None, sleep=None, lock=None, publi
     header = ['DNS 比较：{}（端口 {}）'.format(client.name, port),
               '规则：手动指定 FD IP，两轮公开 TLS 检查通过后更新；不验证实际节点。' if custom_ip else
               '规则：指定反代 IP，两轮节点检查通过后更新。' if command == '/settj'
-              else '规则：本轮同端口下载最快候选，两轮节点检查通过后更新。']
+              else '规则：按最近同端口优选排名依次检查，采用第一个两轮节点验证通过的候选。']
     try:
         result = control.switch(row['ip'], chosen, client, validator=validator, probe=probe_round,
                                 sleep=sleep, lock=lock, observe_before=observe_before)
     except control.Problem as error:
-        raise control.Problem('\n'.join(header + rounds + [str(error)])) from None
+        kind = CandidateFailed if isinstance(error, CandidateFailed) else control.Problem
+        raise kind('\n'.join(header + rounds + [str(error)])) from None
     if custom_ip:
         result = result.replace('节点检查', '公开 TLS 检查')
     return '\n'.join(header + rounds + [result.replace('/dns', '/tj'),
