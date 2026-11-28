@@ -29,12 +29,21 @@ export function parseFdCommand(command: string): { port: 443 | 8443; ip?: string
     return { port, ip: customFdAddress(parts[0]) };
 }
 
-export function parseFdCheck(command: string): { ip: string; ports: (443 | 8443)[] } | null {
+export function fdCheckPort(value: string | number): number {
+    if (!/^[1-9][0-9]{0,4}$/.test(String(value)) || Number(value)>65535
+        || [80,8080,8880,2052,2082,2086,2095].includes(Number(value))) {
+        throw new RescueProblem('请输入合法的 TLS 端口；已禁用 80、8080 等明文端口。');
+    }
+    return Number(value);
+}
+
+export function parseFdCheck(command: string): { ip?: string; ports: number[] } | null {
+    if (command === '/fdcheck') return { ports: [] };
     const match = command.match(/^\/fdcheck ([^\s]+)$/);
     if (!match) return null;
     const parts = match[1].split(':');
-    if (parts.length > 2 || parts.length === 2 && !['443','8443'].includes(parts[1])) {
-        throw new RescueProblem('用法：/fdcheck IPv4，或 /fdcheck IPv4:443 / IPv4:8443。');
+    if (parts.length > 2) {
+        throw new RescueProblem('用法：/fdcheck 检测当前 FD，或 /fdcheck IPv4:TLS端口。');
     }
-    return { ip: customFdAddress(parts[0]), ports: parts.length === 2 ? [Number(parts[1]) as 443 | 8443] : [443,8443] };
+    return { ip: customFdAddress(parts[0]), ports: parts.length === 2 ? [fdCheckPort(parts[1])] : [443,8443] };
 }

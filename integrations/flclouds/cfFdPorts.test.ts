@@ -22,7 +22,10 @@ async function main() {
     }
     assert.equal(normalizeDnsCommand('/fdcheck@OriginalBot 82.110.234.167'),'/fdcheck 82.110.234.167');
     assert.equal(normalizeDnsCommand('fdcheck 82.110.234.167:8443'),'/fdcheck 82.110.234.167:8443');
-    for(const value of ['','192.168.1.160','82.110.234.167:80','82.110.234.167 extra']) {
+    assert.equal(normalizeDnsCommand('/fdcheck'),'/fdcheck');
+    assert.equal(normalizeDnsCommand('/fdcheck@OriginalBot'),'/fdcheck');
+    assert.equal(normalizeDnsCommand('/fdcheck 47.76.57.98:9999'),'/fdcheck 47.76.57.98:9999');
+    for(const value of ['192.168.1.160','82.110.234.167:80','82.110.234.167:65536','82.110.234.167 extra']) {
         assert.equal(normalizeDnsCommand('/fdcheck '+value),'/invalid');
     }
     assert.deepEqual(parseFdCommand('/fd443 82.110.234.167:443'),{port:443,ip:'82.110.234.167'});
@@ -78,7 +81,7 @@ async function main() {
         assert.equal(writes,2);assert.equal(records['tj.example.com'][0].content,'39.105.108.60');
         assert.equal(records['nj.example.com'][0].content,'166.88.14.71');
         const checked:number[]=[];
-        const fdProbe=async(_ip:string,port:443|8443)=>{checked.push(port);return {colo:'NRT'};};
+        const fdProbe=async(_ip:string,port:number)=>{checked.push(port);return {colo:'NRT'};};
         const manual=await oracleDnsCommand('/fd8443 82.110.234.167',cache,fdProbe);
         assert.deepEqual(checked,[8443,8443]);
         assert.equal(writes,3);assert.equal(records['nj.example.com'][0].content,'82.110.234.167');
@@ -87,11 +90,18 @@ async function main() {
         assert.equal(cache.get('fd8443').ip,'166.88.14.71');
         await assert.rejects(oracleDnsCommand('/fd8443 192.168.1.160',cache));
         checked.length=0;
-        const mismatch=async(_ip:string,port:443|8443)=>{checked.push(port);if(port===443)throw new FdCheckProblem('closed');return {colo:'NRT'};};
+        const mismatch=async(_ip:string,port:number)=>{checked.push(port);if(port===443)throw new FdCheckProblem('closed');return {colo:'NRT'};};
         await assert.rejects(oracleDnsCommand('/fd443 82.110.234.167',cache,mismatch),e=>String(e).includes('/fd8443'));
         assert.equal(writes,3);assert.deepEqual(checked,[443,8443]);
         const report=await oracleDnsCommand('/fdcheck 82.110.234.167',cache,mismatch);
         assert.match(report,/未修改 DNS/);assert.equal(writes,3);
+        checked.length=0;
+        const current=await oracleDnsCommand('/fdcheck',cache,fdProbe);
+        assert.match(current,/tj.example.com/);assert.match(current,/nj.example.com/);
+        assert.match(current,/39.105.108.60:443/);assert.match(current,/82.110.234.167:8443/);
+        assert.deepEqual(checked,[443,443,8443,8443]);assert.equal(writes,3);
+        const other=await oracleDnsCommand('/fdcheck 47.76.57.98:9999',cache,fdProbe);
+        assert.match(other,/47.76.57.98:9999/);assert.equal(writes,3);
         assert.match(await oracleDnsCommand('/fdscan',cache),/N1/);assert.equal(writes,3);
     } finally {globalThis.fetch=original;}
     let reads=0,backups=0;

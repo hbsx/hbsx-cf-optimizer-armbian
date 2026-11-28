@@ -273,7 +273,46 @@ class ProxyControlTests(unittest.TestCase):
                               lock=contextlib.nullcontext,sleep=lambda _:None)
         dns.assert_not_called()
         self.assertIn('443：未通过',reply);self.assertIn('8443：两轮',reply)
-        self.assertIn('/fd8443 82.110.234.167:8443',reply);self.assertIn('未修改 DNS',reply)
+        self.assertIn('82.110.234.167:8443',reply);self.assertIn('未修改 DNS',reply)
+
+    def test_bare_fdcheck_checks_current_dns_instead_of_cached_winners(self):
+        class ReadOnly:
+            def __init__(self,token,zone,name):self.name=name
+            def records(self):return [dict(type='A',content='43.159.4.80' if self.name.startswith('tj.') else '43.167.163.135')]
+            def request(self,*_):raise AssertionError('DNS write forbidden')
+        def config(settings,port):return ('token','zone','tj.example.com' if port==443 else 'nj.example.com'),port,self.config
+        checked=[]
+        def public(row,cfg):checked.append((row['ip'],row['port']));return dict(colo='NRT',tcp_ms=20)
+        with patch.object(pc,'configuration',side_effect=config):
+            reply=pc.check_fd('/fdcheck',self.settings,public_probe=public,client_factory=ReadOnly,
+                              sleep=lambda _:None,lock=contextlib.nullcontext)
+        self.assertEqual(checked,[('43.159.4.80',443)]*2+[('43.167.163.135',8443)]*2)
+        for word in ['tj.example.com','nj.example.com','未修改 DNS']:self.assertIn(word,reply)
+
+    def test_fdcheck_accepts_other_tls_ports_and_never_queries_dns_for_explicit_ip(self):
+        public=Mock(return_value=dict(colo='NRT',tcp_ms=20));client=Mock()
+        reply=pc.check_fd('/fdcheck 47.76.57.98:9999',self.settings,public_probe=public,
+                          client_factory=client,sleep=lambda _:None,lock=contextlib.nullcontext)
+        client.assert_not_called();self.assertEqual(public.call_count,2)
+        self.assertTrue(all(c.args[0]['port']==9999 for c in public.call_args_list))
+        self.assertIn('47.76.57.98:9999',reply)
+
+    def test_current_fd_private_dns_address_is_never_probed(self):
+        client=Mock();client.name='tj.example.com';client.records.return_value=[dict(type='A',content='192.168.1.160')]
+        public=Mock()
+        reply=pc.check_fd('/fdcheck',self.settings,public_probe=public,client_factory=lambda *_:client,
+                          sleep=lambda _:None,lock=contextlib.nullcontext)
+        public.assert_not_called();self.assertIn('未通过',reply);client.request.assert_not_called()
+
+    def test_readonly_fdcheck_works_after_reboot_without_the_scan_directory(self):
+        self.config.output=Path(self.temp.name)/'missing-scan-directory'
+        original=self.config.output;seen=[]
+        def public(row,cfg):seen.append(cfg.output);return dict(colo='NRT',tcp_ms=20)
+        with patch.object(pc,'READONLY_RUNTIME',Path(self.temp.name)):
+            pc.check_fd('/fdcheck 47.76.57.98:9999',self.settings,public_probe=public,
+                        sleep=lambda _:None,lock=contextlib.nullcontext)
+        self.assertEqual(seen,[Path(self.temp.name)]*2);self.assertEqual(self.config.output,original)
+        self.assertFalse(original.exists())
 
     def test_wrong_service_port_suggests_alternative_without_changing_dns(self):
         client=Client();ports=[]

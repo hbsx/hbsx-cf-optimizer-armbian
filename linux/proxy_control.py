@@ -15,7 +15,7 @@ import dns_update
 import proxy_scan
 import telegram_control as control
 
-USAGE = '/fd443 [IPv4或IPv4:443] 更新 tj\n/fd8443 [IPv4或IPv4:8443] 更新 nj\n/fdcheck IPv4[:443或8443] 只检测端口，不改 DNS\n不带 IP 使用同端口优选第一名；自定义 IP 仅做公开 TLS 检查。\n/tj 查询；/usetj [地区] [名次]；/settj IPv4 使用已授权地址'
+USAGE = '/fd443 [IPv4或IPv4:443] 更新 tj\n/fd8443 [IPv4或IPv4:8443] 更新 nj\n/fdcheck 检测当前 tj/nj；/fdcheck IPv4:TLS端口 检测指定地址，均不改 DNS\n不带 IP 使用同端口优选第一名；自定义 IP 仅做公开 TLS 检查。\n/tj 查询；/usetj [地区] [名次]；/settj IPv4 使用已授权地址'
 
 
 class CheckLimited(control.Problem):
@@ -30,6 +30,7 @@ class CandidateFailed(control.Problem):
 FAILED_CANDIDATES = {}
 FAILURE_TTL = 15 * 60
 MAX_SWITCH_CANDIDATES = 8
+READONLY_RUNTIME = control.Path('/run/cf-optimizer-bridge')
 
 
 def prune_failures(stamp):
@@ -77,12 +78,21 @@ def parse_fdcheck(text):
     words = text.strip().split()
     if not words or words[0] != '/fdcheck':
         return None
+    if len(words) == 1:
+        return None, ()
     if len(words) != 2:
         raise control.Problem(USAGE)
     parts = words[1].split(':')
-    if len(parts) > 2 or len(parts) == 2 and parts[1] not in ('443', '8443'):
+    if len(parts) > 2:
         raise control.Problem(USAGE)
-    return str(custom_address(parts[0])), (int(parts[1]),) if len(parts) == 2 else (443, 8443)
+    return str(custom_address(parts[0])), (check_port(parts[1]),) if len(parts) == 2 else (443, 8443)
+
+
+def check_port(value):
+    if (not re.fullmatch(r'[1-9][0-9]{0,4}', str(value)) or int(value)>65535
+            or int(value) in proxy_scan.PLAINTEXT_PORTS):
+        raise control.Problem('请输入合法的 TLS 端口；已禁用 80、8080 等明文端口。')
+    return int(value)
 
 
 def parse(text):
@@ -219,28 +229,57 @@ def check_public(row, config, public_probe=None):
     return measured
 
 
-def check_fd(text, settings, public_probe=None, lock=None, sleep=None):
+def check_fd(text, settings, public_probe=None, lock=None, sleep=None, client_factory=None, deadline=None):
     parsed = parse_fdcheck(text)
     if parsed is None:
         raise control.Problem(USAGE)
     ip, ports = parsed
-    _, _, config = configuration(settings, ports[0])
-    lines = ['FD 端口检测：' + ip]
+    lines = ['FD 端口检测：' + ip if ip else '当前 FD IP:端口检测（读取 DNS 当前记录）']
+    targets = []
+    deadline = min(deadline, time.monotonic()+85) if deadline is not None else time.monotonic()+85
+    def readonly_config(config):
+        if not config.output.is_dir() and READONLY_RUNTIME.is_dir() and not READONLY_RUNTIME.is_symlink():
+            # A reboot can remove the scan directory. Read-only probes write no
+            # scan files and can validate the bot's existing tmpfs directory.
+            config = copy.copy(config)
+            config.output = READONLY_RUNTIME
+        return config
     with (lock or control.update_lock)():
-        for port in ports:
-            row = dict(ip=ip, port=port, colo='', brand='Manual')
+        if ip:
+            _, _, config = configuration(settings)
+            config = readonly_config(config)
+            targets = [(ip, port, '', config) for port in ports]
+        else:
+            for port in (443,8443):
+                dns, _, config = configuration(settings, port)
+                config = readonly_config(config)
+                client = (client_factory or control.ControlDNS)(*dns)
+                records = client.records()
+                label = 'FD {} · {}'.format(port, client.name)
+                ips = list(dict.fromkeys(r['content'] for r in records if r['type']=='A'))
+                targets.extend((value, port, label, config) for value in ips[:4])
+                if not ips:lines.append(label+'：暂无 IPv4 A 记录，未检测。')
+                if len(ips)>4:lines.append(label+'：本次检测前 4 个 IPv4，其余未检测。')
+                if any(r['type']=='AAAA' for r in records):lines.append(label+'：IPv6 FD 检测暂不支持。')
+        for address,port,label,config in targets:
+            if time.monotonic()>=deadline:
+                lines.append('检测时间已用尽，其余地址未检测。');break
+            if label:lines.append(label)
             try:
+                row = dict(ip=str(custom_address(address)), port=check_port(port), colo='', brand='Manual')
                 first = check_public(row, config, public_probe)
                 row['colo'] = first['colo']
                 (sleep or time.sleep)(1)
+                if time.monotonic()>=deadline:
+                    lines.append('{}:{}：未完成两轮检查，检测时间已用尽。'.format(address,port));break
                 check_public(row, config, public_probe)
-                target = 'tj' if port == 443 else 'nj'
-                lines.append('{}：两轮公开 CF/TLS 检查通过（{}）；对应 /fd{} {}:{} → {}。'.format(
-                    port, row['colo'], port, ip, port, target))
+                lines.append('{}：两轮公开 CF/TLS 检查通过（{}）；{}:{} 可连通。'.format(
+                    port, row['colo'], address, port))
             except CheckLimited:
                 raise
             except control.Problem:
-                lines.append('{}：未通过两轮公开 CF/TLS 检查，不能确认该端口可用。'.format(port))
+                lines.append('{}：未通过两轮公开 CF/TLS 检查，不能确认 {}:{} 可用。'.format(port,address,port))
+    if not targets:lines.append('没有可检测的当前 FD IPv4 记录。')
     return '\n'.join(lines + ['本次仅检测，未修改 DNS；未验证实际节点或下载速度。'])
 
 

@@ -35,7 +35,7 @@ async function main() {
     const before=calls;
     assert.throws(()=>checkFdEndpoint('192.168.1.160',8443,fake()));assert.equal(calls,before);
     const ports:number[]=[];
-    const probe=async(_ip:string,port:443|8443)=>{ports.push(port);if(port===443)throw new FdCheckProblem('closed');return {colo:'NRT'};};
+    const probe=async(_ip:string,port:number)=>{ports.push(port);if(port===443)throw new FdCheckProblem('closed');return {colo:'NRT'};};
     await assert.rejects(checkBeforeFdWrite('82.110.234.167',443,probe),e=>/\/fd8443 82\.110\.234\.167:8443/.test(String(e)));
     assert.deepEqual(ports,[443,8443]);ports.length=0;
     const report=await fdCheckCommand('/fdcheck 82.110.234.167',probe);

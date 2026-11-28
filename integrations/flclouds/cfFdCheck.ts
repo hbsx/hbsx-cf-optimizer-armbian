@@ -1,21 +1,22 @@
 import { request as httpsRequest, type RequestOptions } from 'node:https';
 import type { ClientRequest } from 'node:http';
 import { checkServerIdentity } from 'node:tls';
-import { customFdAddress, parseFdCheck } from './cfFdCommand.js';
+import { customFdAddress, parseFdCheck, fdCheckPort } from './cfFdCommand.js';
 import { RescueProblem } from './cfDnsRescue.js';
 
 const HOST = 'speed.cloudflare.com';
 export class FdCheckProblem extends RescueProblem {
     constructor(message: string, readonly limited = false) { super(message); }
 }
-export type FdProbe = (ip: string, port: 443 | 8443) => Promise<{ colo: string }>;
+export type FdProbe = (ip: string, port: number) => Promise<{ colo: string }>;
+export type FdCheckTarget = { ip: string; port: number; label?: string };
 
 // Numeric public destination only, pinned public Host/SNI, no redirects, proxy,
 // credentials, private node path, download measurement or persistent files.
-export function checkFdEndpoint(ip: string, port: 443 | 8443,
+export function checkFdEndpoint(ip: string, port: number,
     request: typeof httpsRequest = httpsRequest): Promise<{ colo: string }> {
     const address = customFdAddress(ip);
-    if (port !== 443 && port !== 8443) throw new FdCheckProblem('只检测 443 / 8443。');
+    fdCheckPort(port);
     return new Promise((resolve, reject) => {
         let req: ClientRequest | undefined, settled = false;
         const finish = (error?: FdCheckProblem, value?: { colo: string }) => {
@@ -67,9 +68,9 @@ export function checkFdEndpoint(ip: string, port: 443 | 8443,
     });
 }
 
-export async function verifyFdPort(ip: string, port: 443 | 8443, probe: FdProbe = checkFdEndpoint) {
+export async function verifyFdPort(ip: string, port: number, probe: FdProbe = checkFdEndpoint) {
     customFdAddress(ip);
-    if (port !== 443 && port !== 8443) throw new FdCheckProblem('只检测 443 / 8443。');
+    fdCheckPort(port);
     const first = await probe(ip,port), second = await probe(ip,port);
     if (!/^[A-Z]{3}$/.test(first.colo) || second.colo !== first.colo) {
         throw new FdCheckProblem('两轮 CF 检测机房变化，未确认端口可用。');
@@ -97,18 +98,26 @@ export async function checkBeforeFdWrite(ip: string, port: 443 | 8443, probe: Fd
     }
 }
 
-export async function fdCheckCommand(command: string, probe: FdProbe = checkFdEndpoint): Promise<string> {
+export async function fdCheckCommand(command: string, probe: FdProbe = checkFdEndpoint,
+    current: FdCheckTarget[] = [], notices: string[] = []): Promise<string> {
     const parsed = parseFdCheck(command);
-    if (!parsed) throw new FdCheckProblem('用法：/fdcheck IPv4[:443或8443]。');
-    const lines = [`FD 端口检测：${parsed.ip}`];
-    for (const port of parsed.ports) {
+    if (!parsed) throw new FdCheckProblem('用法：/fdcheck 或 /fdcheck IPv4:TLS端口。');
+    const targets: FdCheckTarget[] = parsed.ip ? parsed.ports.map(port=>({ ip:parsed.ip!,port })) : current;
+    const lines = [parsed.ip ? `FD 端口检测：${parsed.ip}` : '当前 FD IP:端口检测（读取 DNS 当前记录）', ...notices];
+    const deadline = Date.now()+85_000;
+    if(!targets.length) lines.push('没有可检测的当前 FD IPv4 记录。');
+    for (const target of targets.slice(0,8)) {
+        const {ip,port}=target;
+        if(Date.now()>=deadline){lines.push('检测时间已用尽，其余地址未检测。');break;}
+        if(target.label)lines.push(target.label);
         try {
-            const sample = await verifyFdPort(parsed.ip,port,probe);
-            lines.push(`${port}：两轮公开 CF/TLS 检查通过（甲骨文观测 ${sample.colo}）；对应 /fd${port} ${parsed.ip}:${port}。`);
+            const sample = await verifyFdPort(ip,port,probe);
+            lines.push(`${port}：两轮公开 CF/TLS 检查通过（甲骨文观测 ${sample.colo}）；${ip}:${port} 可连通。`);
         } catch (error) {
             if (error instanceof FdCheckProblem && error.limited) throw error;
-            lines.push(`${port}：未通过两轮公开 CF/TLS 检查。`);
+            lines.push(`${port}：未通过两轮公开 CF/TLS 检查；${ip}:${port}。`);
         }
     }
+    if(targets.length>8)lines.push('本次最多检测 8 个地址，其余未检测。');
     return lines.join('\n') + '\n仅检测，未修改 DNS；未测速、未验证实际节点，不能代表家庭线路。\n线路：甲骨文（自动备用）。';
 }

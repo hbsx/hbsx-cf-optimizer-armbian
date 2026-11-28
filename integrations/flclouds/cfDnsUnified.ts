@@ -2,7 +2,7 @@ import { isIP } from 'node:net';
 import { CloudflareRescue, rescueCandidate, rescueSwitch, RescueProblem } from './cfDnsRescue.js';
 import { proxyRescueConfiguration } from './cfProxyRescue.js';
 import { customFdAddress, parseFdCommand } from './cfFdCommand.js';
-import { checkBeforeFdWrite, checkFdEndpoint, fdCheckCommand, type FdProbe } from './cfFdCheck.js';
+import { checkBeforeFdWrite, checkFdEndpoint, fdCheckCommand, type FdProbe, type FdCheckTarget } from './cfFdCheck.js';
 
 export type N1Result = { state: 'ok' | 'unavailable' | 'failed' | 'uncertain' | 'busy'; reply: string };
 type Slot = 'cf4' | 'cf6' | 'fd' | 'fd8443';
@@ -58,6 +58,21 @@ function display(name: string, rows: { type: string; content: string }[]) {
 }
 
 export async function oracleDnsCommand(command: string, cache: CandidateCache, fdProbe: FdProbe = checkFdEndpoint): Promise<string> {
+    if (command === '/fdcheck') {
+        const targets: FdCheckTarget[] = [], notices: string[] = [];
+        for(const port of [443,8443] as const) {
+            try {
+                const {client}=proxyRescueConfiguration(process.env,port), rows=await client.records();
+                const label=`FD ${port} · ${client.name}`;
+                const ips=[...new Set(rows.filter(r=>r.type==='A').map(r=>r.content))];
+                for(const ip of ips.slice(0,4))targets.push({ip,port,label});
+                if(!ips.length)notices.push(`${label}：暂无 IPv4 A 记录，未检测。`);
+                if(ips.length>4)notices.push(`${label}：本次检测前 4 个 IPv4，其余未检测。`);
+                if(rows.some(r=>r.type==='AAAA'))notices.push(`${label}：IPv6 FD 检测暂不支持。`);
+            } catch(error) {notices.push(`FD ${port}：${error instanceof RescueProblem ? error.message : '当前 DNS 查询失败'}，未检测。`);}
+        }
+        return fdCheckCommand(command,fdProbe,targets,notices);
+    }
     if (command.startsWith('/fdcheck ')) return fdCheckCommand(command, fdProbe);
     if (command === '/fdscan') return '手动 FD 优选只能由 N1 执行。N1 当前未连接，未启动扫描。';
     if (command === '/dns' || command === '/tj') {
@@ -102,9 +117,9 @@ export async function oracleDnsCommand(command: string, cache: CandidateCache, f
 export async function runPreferred(command: string, normal: () => Promise<N1Result>,
     backup: () => Promise<string>, readback: () => Promise<string>): Promise<string> {
     const result = await normal();
-    if (command.startsWith('/fdcheck ')) {
+    if (command === '/fdcheck' || command.startsWith('/fdcheck ')) {
         if (result.state === 'unavailable') return backup();
-        if (result.state === 'uncertain') return 'N1 端口检测结果尚未确认，本次仅检测、未修改 DNS；请稍后重新发送 /fdcheck IP。';
+        if (result.state === 'uncertain') return 'N1 端口检测结果尚未确认，本次仅检测、未修改 DNS；请稍后重试 /fdcheck 或 /fdcheck IP:端口。';
         return result.reply;
     }
     if (command === '/fdscan') {

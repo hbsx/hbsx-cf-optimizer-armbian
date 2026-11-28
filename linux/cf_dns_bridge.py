@@ -128,8 +128,9 @@ def execute_job(job, settings):
 
     try:
         command = job['command']
-        if command.startswith('/fdcheck '):
-            return proxy_control.check_fd(command, settings) + '\n线路：N1。', 'ok'
+        if command == '/fdcheck' or command.startswith('/fdcheck '):
+            deadline = time.monotonic() + max(0, job['expires_at'] - time.time() - 5)
+            return proxy_control.check_fd(command, settings,client_factory=JobDNS,deadline=deadline) + '\n线路：N1。', 'ok'
         if command == '/fdscan':
             import manual_proxy_scan
             return manual_proxy_scan.request_scan(job['expires_at']) + '\n线路：N1。', 'ok'
